@@ -31,6 +31,10 @@ pnpm build
 | `taskboard_update` | 更新任务 |
 | `taskboard_status` | 看板概览 |
 
+## 相关
+
+- [我的数字生命爱丽丝 — 插件生态中心（架构总览）](https://github.com/jonah791/alice-digital-life)
+
 ## License
 
 MIT
