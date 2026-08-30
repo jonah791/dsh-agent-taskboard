@@ -32,7 +32,7 @@ export interface Config {
   notifyOnPost: boolean
 }
 export const Config = z.object({
-  boardFile: z.string().default('E:/alice/.taskboard/tasks.json'),
+  boardFile: z.string().default(process.env.DSH_HOME ? process.env.DSH_HOME + '/.taskboard/tasks.json' : 'E:/alice/.taskboard/tasks.json'),
   mainSessionId: z.string(),
   notifyOnPost: z.boolean().default(true),
 })
