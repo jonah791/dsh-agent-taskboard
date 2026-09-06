@@ -21,7 +21,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { TaskboardRemoteService } from './remote.ts'
 
 export const name = 'agent-taskboard'
-export const inject = ['tools', 'agents'] as const
+// memoryApi：可选回流服务（dsh-agent-memory 提供；任务完成摘要回流主记忆库）
+export const inject = ['tools', 'agents', 'memoryApi'] as const
 
 export interface Config {
   /** 任务板文件路径（JSON）。 */
@@ -202,6 +203,16 @@ export function apply(ctx: Context, config: Config): void {
       task.summary = args.summary ?? ''
       task.doneAt = new Date().toISOString()
       saveBoard(boardPath, board)
+      // 完成摘要回流主记忆库（2026-09-06）：任务闭环经验进时间线（memoryApi 可选，不可用静默）
+      try {
+        const api = (ctx as unknown as { memoryApi?: { remember(input: { text: string; kind?: string; tags?: string[]; key?: string }): Promise<unknown> } }).memoryApi
+        if (api !== undefined && task.title) {
+          const text = '## 任务完成：' + task.title + '\n\n' +
+            (args.summary && args.summary.trim() ? args.summary.trim() + '\n\n' : '') +
+            '（任务 ' + task.id + '，' + (task.type ?? 'short') + ' / ' + (task.priority ?? 'normal') + '）'
+          void api.remember({ text, kind: task.type === 'long' ? 'episodic' : 'knowledge', tags: ['任务板', task.id], key: 'task-' + task.id }).catch(() => { /* 回流失败静默 */ })
+        }
+      } catch { /* 回流失败不阻塞任务完成 */ }
       return { taskId: task.id, status: task.status }
     },
   }))
