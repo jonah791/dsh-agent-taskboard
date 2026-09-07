@@ -10,6 +10,12 @@
 -->
 # dsh-agent-taskboard — 任务板插件
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-agent-taskboard"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 DSH（DeepSeek Harness）插件：异步任务队列——主人或任何 agent 可发布任务（JSON 持久化），宿主 agent 空闲时自主领取并完成。
 
 ## 功能特性
