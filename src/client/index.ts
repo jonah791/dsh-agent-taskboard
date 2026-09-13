@@ -22,16 +22,11 @@ export function apply(ctx: ClientContext): void {
       await ctx.plugin({
         name: 'taskboard-ui',
         inject: ['slots', 'remote', 'remote.taskboard'],
-        apply: (child) => {
-          child.slots.inject(
-            'conversation.session.header.actions',
-            () => child.slots.register({
-              name: 'conversation.session.header.actions',
-              id: 'taskboard',
-              order: 30,
-              inject: () => ({ remote: child.remote }),
-            }, TaskboardAction),
-          )
+        apply: () => {
+          // 2026-09-13 撤除 GUI 槽位（主人定调：GUI 只留 1 个入口——面板宿主的「面板」按钮）：
+          // 原此处注册 `conversation.session.header.actions` 的「任务板」按钮（id=taskboard order=30）。
+          // 任务板界面已迁为面板宿主里的一页（dsh-panel `panels/taskboard.ts`，id=taskboard）。
+          // 保留 $mount 与 typert remote（宿主侧工具不受影响）；要恢复入口即在此重新 register。
         },
       })
       console.info('[taskboard] ui ready')
