@@ -10,6 +10,8 @@
  * @module dsh-agent-taskboard
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+// 终态轮转（2026-09-13 主人：「任务板中完成的，你怎么不删啊」）——见 src/retention.ts 头部事故注释
+import { splitTerminalForArchive } from './retention.ts'
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -60,9 +62,47 @@ interface Board {
   tasks: Task[]
 }
 
+/**
+ * 终态在板面保留天数：**0 = 完成/取消即归档**（主人 2026-09-13 定调「任务板中完成的，你怎么不删啊」）。
+ * 归档不丢信息——摘要仍在 `archive/terminal-<date>.json`，且完成调用当场返回完整摘要。
+ */
+const TERMINAL_RETAIN_DAYS = 0
+
+/**
+ * 终态轮转：超期 done/cancelled 归档到 `<boardDir>/archive/terminal-<date>.json` 并从板面移除。
+ * 幂等（无可归档项时不写盘）；归档失败时**原样返回**（宁可不轮转，也不丢数据）。
+ */
+function rotateTerminal(path: string, board: Board): Board {
+  if (!Array.isArray(board.tasks) || board.tasks.length === 0) return board
+  const { keep, archived } = splitTerminalForArchive(board.tasks, {
+    nowMs: Date.now(),
+    retainDays: TERMINAL_RETAIN_DAYS,
+  })
+  if (archived.length === 0) return board
+  try {
+    const dir = dirname(path) + '/archive'
+    mkdirSync(dir, { recursive: true })
+    const file = dir + '/terminal-' + new Date().toISOString().slice(0, 10) + '.json'
+    let prev: { tasks?: unknown[] } = { tasks: [] }
+    try {
+      prev = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: unknown[] }
+    } catch { /* 当日首建 */ }
+    writeFileSync(file, JSON.stringify({
+      archivedAt: new Date().toISOString(),
+      note: '任务板终态归档（' + TERMINAL_RETAIN_DAYS + ' 天保留期外）；可用 taskboard 工具回查，恢复=手工并回 tasks.json',
+      tasks: [...(prev.tasks ?? []), ...archived],
+    }, null, 2), 'utf8')
+    const next: Board = { ...board, tasks: keep as Task[] }
+    writeFileSync(path, JSON.stringify(next, null, 2), 'utf8')
+    return next
+  } catch {
+    return board
+  }
+}
+
 function loadBoard(path: string): Board {
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as Board
+    return rotateTerminal(path, JSON.parse(readFileSync(path, 'utf8')) as Board)
   } catch {
     return { tasks: [] }
   }
