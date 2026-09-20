@@ -17,7 +17,8 @@
     }
   },
   "files": [
-    "lib"
+    "lib",
+    "dsh-plugin.json"
   ],
   "license": "MIT",
   "peerDependencies": {
