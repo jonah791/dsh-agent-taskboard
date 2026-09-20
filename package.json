@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-taskboard",
-  "version": "0.1.1",
-  "description": "任务板插件：主人/任何 agent 可发布任务（异步队列），宿主 agent 空闲时自主领取并完成（不打断会话）。含发布/列表/领取/完成/状态工具与 JSON 持久化 + 新任务排队通知。",
+  "version": "0.2.0",
+  "description": "任务板插件：主人/任何 agent 可发布任务（异步队列），宿主 agent 空闲时自主领取并完成（不打断会话）。含发布/列表/领取/完成/状态工具与 JSON 持久化 + 新任务排队通知；**时间提醒与定时任务**（remindAt/repeatMinutes，到点投递提醒——只送信号不代做），带侧车痕迹 taskboard-trace.jsonl。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

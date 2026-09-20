@@ -9,9 +9,12 @@
  * taskboard_complete / taskboard_cancel / taskboard_update / taskboard_status
  * @module dsh-agent-taskboard
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs'
 // 终态轮转（2026-09-13 主人：「任务板中完成的，你怎么不删啊」）——见 src/retention.ts 头部事故注释
 import { splitTerminalForArchive } from './retention.ts'
+// 时间提醒与定时任务（2026-09-20 主人指令）——纯逻辑层，语义见 docs/semantic.md §4.4 / 不变量 I7–I10
+import { parseWhen, scheduledAt, sweepOnce, errText } from './schedule.ts'
+import type { SchedulableTask, SweepBoard } from './schedule.ts'
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -33,11 +36,21 @@ export interface Config {
   mainSessionId: string
   /** 发布新任务时是否给主会话发排队通知。 */
   notifyOnPost: boolean
+  /** 提醒扫描周期（秒，≥5）；启动时另有一次立即扫（补离线窗口，§5.10 双路）。 */
+  sweepSeconds: number
+  /**
+   * 任务提醒是否**唤醒**会话（缺省 true）。
+   * ⚠ 唤醒 = 启动一次模型 turn = **真花钱**（2026-09-20 主人「钱包紧张」语境下这是显式旋钮，不是隐含行为）。
+   * 置 false = 提醒照常落消息，只是不主动唤醒（等下一次交互时看到）。
+   */
+  remindWakeup: boolean
 }
 export const Config = z.object({
   boardFile: z.string().default(process.env.DSH_HOME ? process.env.DSH_HOME + '/.taskboard/tasks.json' : 'E:/alice/.taskboard/tasks.json'),
   mainSessionId: z.string(),
   notifyOnPost: z.boolean().default(true),
+  sweepSeconds: z.number().default(60),
+  remindWakeup: z.boolean().default(true),
 })
 
 export type TaskStatus = 'pending' | 'claimed' | 'done' | 'cancelled'
@@ -56,6 +69,21 @@ export interface Task {
   claimedAt?: string
   doneAt?: string
   summary?: string
+  // ---- 时间提醒与定时任务（2026-09-20 · 语义见 docs/semantic.md §4.4）----
+  /** 提醒时刻（一次性 / 周期任务的首次时刻，ISO 8601） */
+  remindAt?: string
+  /** 周期（分钟）；缺省 = 一次性 */
+  repeatMinutes?: number
+  /** 下次触发时刻（插件维护；`repeatMinutes` 为空时恒等于 `remindAt`） */
+  nextAt?: string
+  /** 上次触发时刻（防重复触发的判据，I8） */
+  lastFiredAt?: string
+  /** 触发次数（审计） */
+  fireCount?: number
+  /** 该提醒是否唤醒会话（缺省取 config.remindWakeup） */
+  wake?: boolean
+  /** 触发者绑定：设定提醒的会话（`exec.agent.session.id`） */
+  notifySession?: string
 }
 
 interface Board {
@@ -113,6 +141,16 @@ function saveBoard(path: string, board: Board): void {
   writeFileSync(path, JSON.stringify(board, null, 2), 'utf8')
 }
 
+/**
+ * 从工具执行上下文取调用者会话 id（`exec.agent` 是**权威来源**；缺失/形状异常一律降级为 undefined，不抛）。
+ * 语义：§5.18 触发者绑定——「谁设的提醒，就提醒谁」，不用「当前活跃会话」这类代理量。
+ */
+function callerSessionId(exec: unknown): string | undefined {
+  const agent = (exec as { agent?: { session?: { id?: unknown } } } | undefined)?.agent
+  const id = agent?.session?.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
 export function apply(ctx: Context, config: Config): void {
   ctx.plugin(TaskboardRemoteService, {
     boardFile: config.boardFile,
@@ -120,6 +158,97 @@ export function apply(ctx: Context, config: Config): void {
     notifyOnPost: config.notifyOnPost,
   })
   const boardPath = config.boardFile
+
+  // ── 阶段痕迹（§5.22 可维护性：机制必须自证；一行一事件，可 tail/grep）──
+  const tracePath = join(dirname(boardPath), 'taskboard-trace.jsonl')
+  const trace = (event: string, fields: Record<string, unknown> = {}): boolean => {
+    try {
+      mkdirSync(dirname(tracePath), { recursive: true })
+      appendFileSync(tracePath, JSON.stringify({ at: new Date().toISOString(), event, ...fields }) + '\n', 'utf8')
+      return true
+    } catch {
+      return false // 观测绝不反噬主流程
+    }
+  }
+
+  /** 兜底包装（§5.24：逃逸异常曾杀死宿主 web）——捕获后**留痕**（不静默）。 */
+  const guarded = <T,>(stage: string, fn: () => T): T | undefined => {
+    try {
+      return fn()
+    } catch (e) {
+      trace(stage + '-error', { message: errText(e) })
+      return undefined
+    }
+  }
+
+  /**
+   * 提醒投递（§5.18 触发者绑定）：
+   *   ① `notifySession`（设定者会话）可达 → `bound`
+   *   ② 否则遍历 live agents 广播 → `broadcast`
+   *   ③ 两路皆败 → `failed`（由 sweepOnce 记 `deliver-error` 并**保留状态**，下轮重试）
+   * ⚠ 不用 `ctx.agents.get(sessionId)` 作唯一路径：ID 形状不匹配会让消息静默丢失（本生态实测过）。
+   */
+  const deliverReminder = (task: SchedulableTask, text: string): 'bound' | 'broadcast' | 'failed' => {
+    const make = () => createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' },
+    })
+    const wake = task.wake ?? config.remindWakeup
+    const seen = new Set<string>()
+
+    let bound = false
+    const target = task.notifySession
+    if (target !== undefined && target !== '') {
+      try {
+        const agent = ctx.agents.get(target as SessionId)
+        if (agent !== undefined && agent !== null) {
+          agent.send(make(), 'next-turn', wake)
+          bound = true
+          seen.add(target)
+        }
+      } catch (e) {
+        trace('deliver-bound-error', { taskId: task.id, target, message: errText(e) })
+      }
+    }
+    if (bound) return 'bound' // 绑定通道成功即不再广播（防重复提醒）
+
+    let broadcast = false
+    try {
+      for (const agent of ctx.agents.list() as unknown as Agent[]) {
+        const sid = (agent as { id?: string; session?: { id?: string } }).id ?? (agent as { session?: { id?: string } }).session?.id
+        if (sid === undefined || seen.has(sid)) continue
+        seen.add(sid)
+        agent.send(make(), 'next-turn', wake)
+        broadcast = true
+      }
+    } catch (e) {
+      trace('deliver-broadcast-error', { taskId: task.id, message: errText(e) })
+    }
+    return broadcast ? 'broadcast' : 'failed'
+  }
+
+  /** 扫一轮（触发执行点；逻辑全在纯函数层 `schedule.ts`，此处只注入 IO）。 */
+  const doSweep = (): void => {
+    guarded('sweep', () => {
+      const r = sweepOnce({
+        nowMs: Date.now(),
+        load: () => loadBoard(boardPath) as unknown as SweepBoard,
+        save: (b) => saveBoard(boardPath, b as unknown as Board),
+        deliver: deliverReminder,
+        trace,
+      })
+      if (r.due > 0) trace('sweep', { due: r.due, fired: r.fired, failed: r.failed })
+      return r
+    })
+  }
+
+  // ── 触发面双路（§5.10 预防性存活）──
+  // ① 启动即扫：补上「进程不在时错过的窗口」（不靠「刚好在线」）
+  doSweep()
+  // ② 周期扫：guarded 包回调 + unref（不阻止进程退出）+ ctx.effect 清理
+  const sweepTimer = setInterval(() => { doSweep() }, Math.max(5, config.sweepSeconds) * 1000)
+  ;(sweepTimer as unknown as { unref?: () => void }).unref?.()
+  ctx.effect(() => () => { clearInterval(sweepTimer) })
 
   /** 跨会话广播：发布任务 → 所有 live agents（会话）都收到排队通知；mainSessionId 兜底。 */
   const notify = (text: string) => {
@@ -156,16 +285,19 @@ export function apply(ctx: Context, config: Config): void {
   // ---------- taskboard_post ----------
   ctx.tools.register(defineTool({
     name: 'taskboard_post',
-    description: '发布任务到任务板（异步队列）：主人或任何 agent 可调用；发布后发排队通知（不打断会话），宿主空闲时自主领取。',
+    description: '发布任务到任务板（异步队列）：主人或任何 agent 可调用；发布后发排队通知（不打断会话），宿主空闲时自主领取。可带时间提醒（到点只送达提醒，不代做任务）。',
     parameters: {
       title: { type: 'string', required: true, description: '任务标题' },
       description: { type: 'string', description: '任务详情' },
       type: { type: 'string', enum: ['short', 'long'], description: '任务类型：short=短期任务 / long=长期任务' },
       priority: { type: 'string', enum: ['low', 'normal', 'high'], description: '优先级' },
       tags: { type: 'array', items: { type: 'string' }, description: '标签' },
+      remindAt: { type: 'string', description: '提醒时刻：ISO / +30m / +2h / HH:MM / YYYY-MM-DD HH:MM（缺省不设提醒）' },
+      repeatMinutes: { type: 'integer', description: '重复周期（分钟）；给了则每周期提醒一次（错过只补一次，不堆积）' },
+      wake: { type: 'boolean', description: '该提醒是否唤醒会话（缺省取 config.remindWakeup）' },
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, status: { type: 'string', required: true } } }, render: (_a, v) => [{ type: 'text', text: '任务已发布：' + v.id + '（' + v.status + '）' }] },
-    async execute(args: { title: string; description?: string; type?: string; priority?: string; tags?: string[] }) {
+    async execute(args: { title: string; description?: string; type?: string; priority?: string; tags?: string[]; remindAt?: string; repeatMinutes?: number; wake?: boolean }, exec: unknown) {
       const board = loadBoard(boardPath)
       const task: Task = {
         id: 't-' + randomUUID().slice(0, 8),
@@ -177,10 +309,85 @@ export function apply(ctx: Context, config: Config): void {
         status: 'pending',
         createdAt: new Date().toISOString(),
       }
+      let remindNote = ''
+      if (args.remindAt !== undefined && args.remindAt !== '') {
+        const atMs = parseWhen(args.remindAt, Date.now()) // 非法输入**抛错**（不静默取 now）
+        if (args.repeatMinutes !== undefined && (!Number.isFinite(args.repeatMinutes) || args.repeatMinutes <= 0)) {
+          throw new Error('repeatMinutes 必须为正整数（分钟）')
+        }
+        task.remindAt = new Date(atMs).toISOString()
+        task.nextAt = task.remindAt
+        if (args.repeatMinutes !== undefined) task.repeatMinutes = args.repeatMinutes
+        if (args.wake !== undefined) task.wake = args.wake
+        const caller = callerSessionId(exec)
+        if (caller !== undefined) task.notifySession = caller // 触发者绑定
+        remindNote = '｜提醒 ' + task.remindAt + (task.repeatMinutes !== undefined ? '（每 ' + task.repeatMinutes + ' 分钟）' : '')
+      }
       board.tasks.push(task)
       saveBoard(boardPath, board)
-      notify('【任务板】新任务：' + task.title + '（' + task.id + '，优先级 ' + task.priority + '）——空闲时自主领取处理。')
+      trace('post', { taskId: task.id, priority: task.priority, remindAt: task.remindAt ?? null })
+      notify('【任务板】新任务：' + task.title + '（' + task.id + '，优先级 ' + task.priority + remindNote + '）——空闲时自主领取处理。')
       return { id: task.id, status: task.status }
+    },
+  }))
+
+  // ---------- taskboard_remind（时间提醒 / 定时任务）----------
+  ctx.tools.register(defineTool({
+    name: 'taskboard_remind',
+    description: '给任务设/挪/清时间提醒，或列出全部待触发提醒。到点只投递提醒，**不代做任务**（做不做由 agent 判断）。',
+    parameters: {
+      taskId: { type: 'string', description: '任务 id（action=list 时可省）' },
+      action: { type: 'string', enum: ['set', 'clear', 'list'], description: 'set=设/挪（缺省）· clear=清除 · list=列出待触发' },
+      at: { type: 'string', description: 'set 必需：ISO / +30m / +2h / HH:MM / YYYY-MM-DD HH:MM' },
+      repeatMinutes: { type: 'integer', description: 'set 可选：重复周期（分钟）' },
+      wake: { type: 'boolean', description: 'set 可选：该提醒是否唤醒会话' },
+    },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string', required: true }, reminders: { type: 'json' } } }, render: (_a, v) => [{ type: 'text', text: v.note + (((v.reminders ?? []) as unknown[]).length > 0 ? String.fromCharCode(10) + ((v.reminders ?? []) as { id: string; title: string; nextAt: string; repeatMinutes?: number | null }[]).map((r) => '⏰ ' + r.title + ' (' + r.id + ') → ' + r.nextAt + (r.repeatMinutes != null ? '（每 ' + r.repeatMinutes + ' 分钟）' : '')).join(String.fromCharCode(10)) : '') }] },
+    async execute(args: { taskId?: string; action?: string; at?: string; repeatMinutes?: number; wake?: boolean }, exec: unknown) {
+      const action = args.action ?? 'set'
+      const board = loadBoard(boardPath)
+
+      if (action === 'list') {
+        const reminders = board.tasks
+          .filter((t) => (t.nextAt ?? t.remindAt) !== undefined && t.status !== 'done' && t.status !== 'cancelled')
+          .slice()
+          .sort((a, b) => (scheduledAt(a as SchedulableTask) ?? 0) - (scheduledAt(b as SchedulableTask) ?? 0))
+          .map((t) => ({ id: t.id, title: t.title, status: t.status, nextAt: t.nextAt ?? t.remindAt ?? '', repeatMinutes: t.repeatMinutes ?? null, lastFiredAt: t.lastFiredAt ?? null, fireCount: t.fireCount ?? 0 }))
+        return { ok: true, note: '【任务板】待触发提醒 ' + reminders.length + ' 条', reminders }
+      }
+
+      const taskId = args.taskId
+      if (taskId === undefined || taskId === '') throw new Error('taskId 必填（action=list 除外）')
+      const task = board.tasks.find((t) => t.id === taskId)
+      if (task === undefined) throw new Error('任务不存在：' + taskId)
+
+      if (action === 'clear') {
+        delete task.remindAt
+        delete task.nextAt
+        delete task.repeatMinutes
+        delete task.wake
+        // 保留 lastFiredAt / fireCount 作为**历史留痕**（清提醒 ≠ 抹掉「它曾提醒过」）
+        saveBoard(boardPath, board)
+        trace('remind-clear', { taskId: task.id })
+        return { ok: true, note: '已清除提醒：' + task.id }
+      }
+
+      if (args.at === undefined || args.at === '') throw new Error('action=set 需要 at（ISO / +30m / HH:MM / YYYY-MM-DD HH:MM）')
+      if (args.repeatMinutes !== undefined && (!Number.isFinite(args.repeatMinutes) || args.repeatMinutes <= 0)) {
+        throw new Error('repeatMinutes 必须为正整数（分钟）')
+      }
+      const atMs = parseWhen(args.at, Date.now())
+      task.remindAt = new Date(atMs).toISOString()
+      task.nextAt = task.remindAt
+      if (args.repeatMinutes !== undefined) task.repeatMinutes = args.repeatMinutes
+      else delete task.repeatMinutes
+      if (args.wake !== undefined) task.wake = args.wake
+      const caller = callerSessionId(exec)
+      if (caller !== undefined) task.notifySession = caller // 触发者绑定（谁设的提醒就提醒谁）
+      delete task.lastFiredAt // 重设时刻 = 新一轮（否则旧的 lastFiredAt 会压住新 nextAt）
+      saveBoard(boardPath, board)
+      trace('remind-set', { taskId: task.id, nextAt: task.nextAt, repeatMinutes: task.repeatMinutes ?? null, notifySession: task.notifySession ?? null })
+      return { ok: true, note: '已设提醒：' + task.id + ' → ' + task.nextAt + (task.repeatMinutes !== undefined ? '（每 ' + task.repeatMinutes + ' 分钟）' : ''), reminders: [{ id: task.id, title: task.title, nextAt: task.nextAt, repeatMinutes: task.repeatMinutes ?? null }] }
     },
   }))
 

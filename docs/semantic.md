@@ -106,15 +106,52 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 | 消费方 | 爱丽丝与全部并行实例（协调界面）；面板宿主 `dsh-panel`（`panels/taskboard.ts`）；`memoryApi`（接收回流） | — |
 | 测试 | `tests/retention.test.mjs`（I1–I3 的离线判据） | `pnpm test` |
 
-## 5 · 边界与信任
+### 4.4 时间提醒与定时任务（2026-09-20 新增能力 · 主人指令）
+
+> 一句话：**给任务加上时间维度**——到点提醒、可重复；**仍然不自动执行任何任务**（调度只送达信号）。
+
+| 字段 | 形状 | 语义 |
+|---|---|---|
+| `remindAt` | ISO 8601 字符串 | 一次性提醒时刻（首次时刻；与 `repeatMinutes` 组合时为「首次 + 周期」） |
+| `repeatMinutes` | 正整数 | 周期（分钟）。触发后 `nextAt` 前进到**严格大于 now** 的下一时刻 ⇒ **错过 N 轮只触发一次**（不堆积补发） |
+| `nextAt` | ISO 8601 | **下次触发时刻**（运行态字段，插件维护；无 `repeatMinutes` 时恒等于 `remindAt`） |
+| `lastFiredAt` / `fireCount` | ISO / 整数 | 触发留痕：防重复触发 + 可审计 |
+| `wake` | 布尔 | 该提醒是否**唤醒**会话（缺省取 `config.remindWakeup`） |
+| `notifySession` | 会话 id | **触发者绑定**：设定提醒的会话（`exec.agent.session.id`）——投递首选目标 |
+
+| 工具 | 参数 | 语义 |
+|---|---|---|
+| `taskboard_post`（扩展） | `+ remindAt? / repeatMinutes? / wake?` | 发布时即带提醒 |
+| `taskboard_remind`（新） | `taskId? · action: set\|clear\|list · at? · repeatMinutes? · wake?` | 设/挪/清提醒；`list` 列出全部待触发（按 `nextAt` 升序） |
+
+**时间输入形态**（`src/schedule.ts parseWhen`，纯函数）：ISO 8601 · 相对偏移 `+30m`/`+2h`/`+1d`/`+90s` · 当日 `HH:MM`（已过则顺延次日）· `YYYY-MM-DD HH:MM`（本地时区）。**非法输入抛错**——不静默取 now（否则「以为设了提醒，实际立刻触发」）。
+
+**触发面（双路 · §5.10 预防性存活）**
+1. **周期扫**：`setInterval(guarded('sweep', () => sweepOnce(deps)), config.sweepSeconds × 1000)` + `.unref()`；`ctx.effect` 里 `clearInterval` 清理。
+2. **启动即扫**：`apply` 内立即跑一次——补上「进程不在时错过的窗口」。
+
+**投递语义（§5.18 触发者绑定）**：首选 `notifySession`（设定者会话）→ 不可达时**回退广播 live agents**，两条路径都在痕迹里记 `deliver-via: bound|broadcast`；**成败皆留痕**。
+
+**不变量**
+
+- **I7 不自动执行 `[MUST]`**：调度**只送达提醒**，绝不替 agent 领取/执行/完成任何任务——本插件的根边界不因新增调度而松动（「框架给原语，不给剧本」）。
+- **I8 一次触发一次通知 `[MUST]`**：同一 `nextAt` 至多投递一次（判据 `lastFiredAt ≥ nextAt` ⇒ 不再触发）；重复投递视为缺陷。
+- **I9 重复任务不堆积 `[MUST]`**：`repeatMinutes` 任务触发后 `nextAt` 前进到严格大于 now 的下一时刻——错过 N 轮只触发一次，不补偿堆积。
+- **I10 调度失败可见 `[MUST]`**：扫/投递的每次异常都落 `taskboard-trace.jsonl`；`sweep` 回调**必须**包 `guarded()`（逃逸异常 = 宿主死因，§5.24）。
+
+
 
 - **能力边界 ≠ 沙箱**：`taskboard_post` 任何人可调（无鉴权）——板上内容**不可信输入**，只是文本（不执行、不解析为指令）。
-- **不越界清单**：不执行任务（无调度/无子进程）；不删任务（`cancel` 是状态流转；`delete` 只在 client remote 的 `mutate` 里可用，工具面无删除参数）；不写会话事件以外的通道（通知走 `agent.send`，属正常会话事件，Model-visible ⟺ logged 满足）。
+- **不越界清单**：不执行任务（**2026-09-20 起有调度，但调度只送达提醒**——不领取、不执行、不完成任何任务；仍无子进程）；不删任务（`cancel` 是状态流转；`delete` 只在 client remote 的 `mutate` 里可用，工具面无删除参数）；不写会话事件以外的通道（通知走 `agent.send`，属正常会话事件，Model-visible ⟺ logged 满足）。
 - **失败面**：
   - 读失败/坏 JSON → 空板（**放行 + 静默**）：代价是「看不见历史」，但不阻塞任何写入；⚠ 这是宽容策略，误删文件不会被察觉——见 U2。
   - 写失败（磁盘满/权限） → `writeFileSync` 抛错向上冒泡到工具层（**响亮失败**）；轮转路径例外：归档写失败回退「不轮转」（I4）。
-  - 通知失败 → `catch {}` 静默（`index.ts:153`）：**已知缺口**——通知是协作信号，静默失败意味着「发了但没人知道」。当前接受该代价（任务本身已在板上可见）。
+  - 通知失败 → `catch {}` 静默（`index.ts:153`）：**已知缺口**——通知是协作信号，静默失败意味着「发了但没人知道」。当前接受该代价（任务本身已在板上可见）。⚠ 新增的**提醒投递不走这条静默路径**（见下条）。
   - 回流失败 → 静默（`index.ts:253/255`）：任务完成不回滚。
+  - **调度扫失败** → `guarded('sweep')` 捕获 + 落 `taskboard-trace.jsonl` 一行（**不静默**，I10/§5.24）；扫本身不阻塞任何工具调用。
+  - **提醒投递失败** → 首选 `notifySession` 不可达即**回退广播 live agents**；两路都失败才记 `deliver-error`（**留痕不静默**——提醒是我的时间承诺，静默丢失比多发一条更糟）。
+  - **时间输入非法** → `parseWhen` **抛错**（响亮失败）；绝不静默取 now（否则「以为设了提醒，实际立刻触发」）。
+
 
 ## 6 · 与既有机制的关系
 
@@ -127,6 +164,11 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 | dsh-panel | GUI 入口收敛为面板宿主一页（`panels/taskboard.ts`）；本插件的 client 侧只保留 `$mount` |
 | dsh-agent-memory | `inject` 依赖：本插件因 `memoryApi` 声明而**受其激活门约束**（服务缺失 → 不激活） |
 | web profile 组合 | `mainSessionId` 是**锚点**（值 `session-5a785c96-…`），通知兜底与默认 assignee 用它；锚点腐化时通知仍能覆盖 live 列表（`notify()` 遍历 `ctx.agents.list()`） |
+| §5.10（预防性存活） | 触发面**双路**：周期扫 + **启动即扫**——进程不在时错过的窗口由启动扫补上（治未乱，不靠「刚好在线」） |
+| §5.12（提醒防静默失效） | 触发状态**落盘**（`nextAt`/`lastFiredAt`）而非只在内存 timer；投递前**重验判重**（`lastFiredAt ≥ nextAt` 则不发）；触发留痕可外部观察 |
+| §5.18（触发者绑定） | 提醒首选投给**设定者会话**（`notifySession` ← `exec.agent`），`mainSessionId` 只作兜底；**不用「当前活跃会话」当代理量** |
+| §5.24（异常隔离） | 扫回调包 `guarded()`；并有源码级契约测试断言 `setInterval` 回调必经 `guarded(`（逃逸异常曾杀过宿主 web） |
+| 先例（同生态） | `dsh-agent-reflection`（`setInterval` + `unref` + `ctx.effect` 清理）、`dsh-agent-cluster`（`guarded()` 包回调 + 契约测试）——本插件的调度沿用同一形态 |
 
 ## 7 · 可证伪验收清单
 
@@ -141,6 +183,14 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 | A7 | 完成回流记忆（key 幂等） | `recall key=task-<id>` 命中 / 重复完成覆盖而非追加 | 待验收 |
 | A8 | 发布广播 `wakeup=false`（不打断运行中会话） | 会话事件流中 `taskboard_post` 后无新 turn 被强启 | 待验收 |
 | A9 | GUI 槽位已撤、面板入口可用 | `src/client/index.ts:26-29` 注释即现状；浏览器打开面板宿主「任务板」页 | 待验收（需浏览器验收） |
+| A10 | 时间输入四形态都能解析，非法输入抛错 | `node --test tests/schedule.test.mjs`：ISO / `+30m` / `HH:MM`（已过顺延次日）/ `YYYY-MM-DD HH:MM` 各断言；`"nonsense"` 必抛 | **已实测**（2026-09-20 · 27/27 全绿） |
+| A11 | 到点触发一次且**不重复** | 单测：`nextAt` 已过 + `lastFiredAt` 为空 → 命中；再跑一次（`lastFiredAt` 已写）→ 不命中（I8） | **已实测** |
+| A12 | 重复任务**不堆积**（错过 N 轮只触发一次） | 单测：`nextAt` 是 5 轮前、`repeatMinutes=10` → `advanceNext` 返回严格 > now 的下一次（I9） | **已实测** |
+| A13 | 终态任务不再触发 | 单测：`status=done`/`cancelled` 且 `nextAt` 已过 → 不计入 due | **已实测** |
+| A14 | 扫执行点在 `guarded()` 内 + 定时器回调走它（源码级契约） | 单测：扫 `src/index.ts`，断言 `guarded('sweep'` 存在、`setInterval(` 回调为 `doSweep`、有 `ctx.effect` 清理与 `unref`；另断言纯逻辑层无 `child_process` 等（I7） | **已实测** |
+| A15 | 冷路径：投递失败不吞（状态不动 + 下轮重试）、坏板不崩、无到点项零 IO | 单测：`sweepOnce` 三个退化样本（`deliver:'failed'` / `load:{}` / 未来时刻） | **已实测** |
+| A16 | 线上真调：设提醒 → 到点真投递 | 2026-09-20 15:12 实测：`taskboard_post {remindAt:'+1m'}` → 15:13:50 痕迹 `deliver … via=bound` + `sweep due=1 fired=1 failed=0`；板面 `lastFiredAt`/`fireCount=1`/`notifySession=session-005ddf46-…`（**本会话**，触发者绑定生效） | **已实测**（重启生效后线上） |
+| A17 | 痕迹可答「断在哪一段」 | `.taskboard/taskboard-trace.jsonl` 三行实录：`post`（含 remindAt）/ `deliver`（含 `via`/`fireCount`）/ `sweep`（含 `due/fired/failed`）；失败面另有 `deliver-error`/`sweep-error`/`save-error` | **已实测** |
 
 ## 8 · 与实现的关系
 
@@ -174,9 +224,23 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 - 语义**被修正**：无（未发现文档与实现冲突；此前无文档）。
 - 教训（同时回写技能 `semantic-doc-first`）：**「配置值」是语义的一部分**——`notifyOnPost=false`、`mainSessionId` 锚点这类值不写进文档，读者就会按「默认行为」理解线上行为。补课文档必须核对**profile 里的实际 config**，不能只读源码默认值。
 
+**2026-09-20 新增：时间提醒与定时任务（主人指令「给任务板插件添加到时间提醒机制和定时任务功能」）**
+
+- 语义**被补充（新能力面）**：任务新增时间维度（`remindAt` / `repeatMinutes` / `nextAt` / `lastFiredAt` / `fireCount` / `wake` / `notifySession`），新增工具 `taskboard_remind`，`taskboard_post` 扩参；触发面**双路**（周期扫 + 启动即扫）；新增 `taskboard-trace.jsonl` 阶段痕迹。**先写文档后写码**（§5.20）——本次是文档先行的正面案例。
+- 语义**被修正（边界表述，重要）**：§5「不越界清单」原文写「不执行任务（**无调度**/无子进程）」——新增调度后该表述**不再为真**，改为「**有调度，但调度只送达提醒**（不领取/不执行/不完成）」。**教训：「无 X」型断言会随能力增长静默腐化**——加能力时必须全文回扫「无/不」类句子。
+- 设计取舍（三条，都为了不越过根边界）：
+  1. **只提醒、不执行**（I7）：主人要的是「定时任务」，但**自动执行任务**会让插件从「原语」变成「剧本」——违背本插件定位与 §2.1（框架给原语，不给剧本）。故定调：**到点送信号，做不做由 agent 判断**。
+  2. **错过只补一次**（I9）：周期任务错过 N 轮不补偿堆积——提醒的价值在「此刻该注意」，不在补账；堆积会制造噪音（信噪比是任务板的生命线）。
+  3. **投递留痕不回退到静默**（§5 失败面）：既有 `notify()` 的 `catch {}` 是已知缺口；新的提醒投递**明确不走那条路**（先 bound 后 broadcast，两路皆失败才 `deliver-error`）。
+- 语义**被补充（与纪律的同源关系）**：§6 新增四行，把 §5.10/§5.12/§5.18/§5.24 与本能力的对应点写明（不是装饰：每条都对应一个具体的实现约束与一条验收）。
+
+
 ## 10 · 未决问题
 
 - **U1 并发写保护**：`loadBoard/saveBoard` 无锁，两个并行实例同时 `claim` 同一任务会丢更新（§5.14 并行是常态工况）。倾向：写前 `statSync` 比对 mtime + 冲突重试，或改用追加式日志 + 折叠视图。需要主人裁决是否值得工程投入。
 - **U2 读失败静默返回空板**：与「坏数据一律放行 + 落 issue」的纪律不符——建议加 `console/logger.warn` + 计数落盘（现存 `tasks.json` 被误删时目前**完全无声**）。
 - **U3 `mainSessionId` 锚点腐化**：值为 `session-5a785c96-…`（09-13 的会话），而通知主路径已改为遍历 live agents；是否把锚点从「默认 assignee」职责中也去掉（改为「当前发起者」）？
 - **U4 与 `dsh-agent-teams` 的职责边界**：分身派发记录是否必须写进任务板（当前是约定非机制）？
+- **U5 提醒的「唤醒」语义要主人拍板（2026-09-20 新增）**：`wake=true` 会**启动一次模型 turn**（真花钱）。当前默认 `remindWakeup=true`（主人明确要「时间提醒」，不唤醒的提醒等于没提醒），且**每个任务可单独设 `wake`**。若预算优先，可把 profile 里的 `remindWakeup` 改 `false`（提醒照常落消息，只是不主动唤醒）——**取舍归主人**。
+- **U6 提醒与 life-core 感知圈的职责重叠（2026-09-20 新增）**：两者都能「到点叫醒我」。当前分工：任务板的提醒**绑任务**（有 `taskId`、有交付面），life-core 管**存在性节律**（感知圈/睡眠）。倾向：保持分工、不互相实现；若将来合并，必须保留「任务提醒」这一语义（否则任务的时间承诺失去归属）。
+

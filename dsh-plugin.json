@@ -3,7 +3,7 @@
   "manifestVersion": "0.1.0",
   "id": "com.jonah791.agent-taskboard",
   "name": "dsh-agent-taskboard",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "apiVersion": ">=0.1.0 <0.2.0",
   "entrypoints": {
     "host": "lib/fabric.js"
