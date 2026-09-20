@@ -189,7 +189,7 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 | A13 | 终态任务不再触发 | 单测：`status=done`/`cancelled` 且 `nextAt` 已过 → 不计入 due | **已实测** |
 | A14 | 扫执行点在 `guarded()` 内 + 定时器回调走它（源码级契约） | 单测：扫 `src/index.ts`，断言 `guarded('sweep'` 存在、`setInterval(` 回调为 `doSweep`、有 `ctx.effect` 清理与 `unref`；另断言纯逻辑层无 `child_process` 等（I7） | **已实测** |
 | A15 | 冷路径：投递失败不吞（状态不动 + 下轮重试）、坏板不崩、无到点项零 IO | 单测：`sweepOnce` 三个退化样本（`deliver:'failed'` / `load:{}` / 未来时刻） | **已实测** |
-| A16 | 线上真调：设提醒 → 到点真投递 | 2026-09-20 15:12 实测：`taskboard_post {remindAt:'+1m'}` → 15:13:50 痕迹 `deliver … via=bound` + `sweep due=1 fired=1 failed=0`；板面 `lastFiredAt`/`fireCount=1`/`notifySession=session-005ddf46-…`（**本会话**，触发者绑定生效） | **已实测**（重启生效后线上） |
+| A16 | 线上真调：设提醒 → 到点真投递**且消息落进会话** | 2026-09-20 15:12 实测：`taskboard_post {remindAt:'+1m'}` → 15:13:50 痕迹 `deliver … via=bound` + `sweep due=1 fired=1 failed=0`；板面 `lastFiredAt`/`fireCount=1`/`notifySession=session-005ddf46-…`（**本会话**，触发者绑定生效）；**且提醒消息确实出现在会话里**（`【任务板·提醒】自检：…——到点了，是否处理由我判断（插件不代做）`）⇒ 投递链路 Model-visible ⟺ logged 成立 | **已实测**（重启生效后线上，含消息落地） |
 | A17 | 痕迹可答「断在哪一段」 | `.taskboard/taskboard-trace.jsonl` 三行实录：`post`（含 remindAt）/ `deliver`（含 `via`/`fireCount`）/ `sweep`（含 `due/fired/failed`）；失败面另有 `deliver-error`/`sweep-error`/`save-error` | **已实测** |
 
 ## 8 · 与实现的关系
