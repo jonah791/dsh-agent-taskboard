@@ -1,6 +1,6 @@
 # 语义文档：dsh-agent-taskboard（任务板 · 异步任务队列）
 
-> 版本 v0.1 · 2026-09-14 · 作者：爱丽丝 · 状态：**draft**
+> 版本 v0.1 · 2026-09-14 · 作者：爱丽丝 · 状态：**implemented**（17 条验收已实测 11 / 待验收 6 ⇒ 未达 `verified`）
 > 开发方式：语义文档优先（本份是 2026-09-14 可维护性工程的**补课**文档）
 > 实现落点：`self-plugins/dsh-agent-taskboard/src/index.ts`（+ 服务层 `src/remote.ts`、纯函数 `src/retention.ts`、客户端 `src/client/index.ts`）
 
@@ -11,7 +11,7 @@
 | 实现落点 | `src/index.ts`（工具面 + 通知 + 终态轮转接线）、`src/remote.ts`（Typert Remote 服务 `taskboardRemote`，namespace `taskboard`）、`src/retention.ts`（轮转纯函数）、`src/client/index.ts`（client 插件：`$mount` remote） |
 | 版本 | 0.1.1（git head `d6bf990`） |
 | 挂载位置 | `.dsh/profiles/web/cordis.patch.yml` **行 69–75** `insert` 块：行 id `agent-taskboard`（:70）、name `dsh-agent-taskboard`（:71）、config `boardFile: E:/alice/.taskboard/tasks.json`（:73）、`mainSessionId: session-5a785c96-d682-4290-9641-ca8213abba8f`（:74）、`notifyOnPost: false`（:75） |
-| 状态 | **draft** |
+| 状态 | **implemented**（实现落点齐全、17 条验收 11 条已实测；未达 `verified`——`pending≠0`） |
 | 测试 | `tests/retention.test.mjs`（轮转纯函数） |
 
 ## 1 · 定位与反定位
@@ -141,6 +141,8 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 
 
 
+## 5 · 边界与信任
+
 - **能力边界 ≠ 沙箱**：`taskboard_post` 任何人可调（无鉴权）——板上内容**不可信输入**，只是文本（不执行、不解析为指令）。
 - **不越界清单**：不执行任务（**2026-09-20 起有调度，但调度只送达提醒**——不领取、不执行、不完成任何任务；仍无子进程）；不删任务（`cancel` 是状态流转；`delete` 只在 client remote 的 `mutate` 里可用，工具面无删除参数）；不写会话事件以外的通道（通知走 `agent.send`，属正常会话事件，Model-visible ⟺ logged 满足）。
 - **失败面**：
@@ -234,6 +236,14 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
   3. **投递留痕不回退到静默**（§5 失败面）：既有 `notify()` 的 `catch {}` 是已知缺口；新的提醒投递**明确不走那条路**（先 bound 后 broadcast，两路皆失败才 `deliver-error`）。
 - 语义**被补充（与纪律的同源关系）**：§6 新增四行，把 §5.10/§5.12/§5.18/§5.24 与本能力的对应点写明（不是装饰：每条都对应一个具体的实现约束与一条验收）。
 
+**2026-09-22 补回丢失的节标题 + 状态诚实化（任务 t-df4642e5 · D4 归零）**
+
+- 语义**被修正（结构性缺陷）**：`semantic_check` 报 D4「缺第 5 节」——**查证后真因不是内容缺失，而是标题行丢失**：§5 的三块内容（能力边界 / 不越界清单 / 失败面）一直在正文里，缺的是 `## 5 · 边界与信任` 这一行标题，行号直接从 I10 跳到 `## 6 · 既有机制的关系`。补回标题后 D4 归零。
+  ⇒ **教训（与同日 `dsh-dream-tavern` 的 D4 假报互为补集）**：D4 的判据是**标题存在性**，不是内容存在性。两种误读都要防——
+  ① 「措辞差一字」⇒ **假报**（`与实现关系` vs `与实现的关系`）；
+  ② 「内容在、标题丢」⇒ **真报但诊断误导**（报「缺一节」，实际缺一行）。
+  读 D4 的正确姿势：**先 grep 标题、再看内容**——不要凭报错文字直接下「补内容」的任务单（本任务的原描述就写成了「补缺失的第 5 节」，是误读）。
+- 语义**被修正（声明 vs 事实）**：状态由 `draft` 改为 `implemented`——实现落点齐全、17 条验收 11 条已实测。**未标 `verified`**：`pending=6 ≠ 0`（§5.20 规则 4 硬判据）。声明状态应与现算状态一致，否则是「声明≠事实」的慢性病。
 
 ## 10 · 未决问题
 
