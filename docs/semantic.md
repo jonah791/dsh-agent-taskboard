@@ -1,18 +1,18 @@
 # 语义文档：dsh-agent-taskboard（任务板 · 异步任务队列）
 
-> 版本 v0.1 · 2026-09-14 · 作者：爱丽丝 · 状态：**implemented**（17 条验收已实测 11 / 待验收 6 ⇒ 未达 `verified`）
+> 版本 v0.2 · 2026-09-22 · 作者：爱丽丝 · 状态：**implemented**（26 条验收已实测 17 / 待验收 9 ⇒ 未达 `verified`）
 > 开发方式：语义文档优先（本份是 2026-09-14 可维护性工程的**补课**文档）
-> 实现落点：`self-plugins/dsh-agent-taskboard/src/index.ts`（+ 服务层 `src/remote.ts`、纯函数 `src/retention.ts`、客户端 `src/client/index.ts`）
+> 实现落点：`self-plugins/dsh-agent-taskboard/src/`（工具面 `index.ts` · 状态机 `statemachine.ts` · 严格读写 `board.ts` · 归档回查 `archive.ts` · 远程服务 `remote.ts` · 轮转 `retention.ts` · 定时 `schedule.ts` · Fabric 入口 `fabric.ts` · 客户端 `client/index.ts`）
 
 | 项 | 值 |
 |----|----|
 | 能力名 | dsh-agent-taskboard（任务板 / 异步任务队列 + 协调界面） |
 | 主副本路径 | `self-plugins/dsh-agent-taskboard/docs/semantic.md`（本文件） |
-| 实现落点 | `src/index.ts`（工具面 + 通知 + 终态轮转接线）、`src/remote.ts`（Typert Remote 服务 `taskboardRemote`，namespace `taskboard`）、`src/retention.ts`（轮转纯函数）、`src/client/index.ts`（client 插件：`$mount` remote） |
-| 版本 | 0.1.1（git head `d6bf990`） |
-| 挂载位置 | `.dsh/profiles/web/cordis.patch.yml` **行 69–75** `insert` 块：行 id `agent-taskboard`（:70）、name `dsh-agent-taskboard`（:71）、config `boardFile: E:/alice/.taskboard/tasks.json`（:73）、`mainSessionId: session-5a785c96-d682-4290-9641-ca8213abba8f`（:74）、`notifyOnPost: false`（:75） |
-| 状态 | **implemented**（实现落点齐全、17 条验收 11 条已实测；未达 `verified`——`pending≠0`） |
-| 测试 | `tests/retention.test.mjs`（轮转纯函数） |
+| 实现落点 | `src/index.ts`（**10 个工具** + 通知 + 终态轮转接线）、`src/statemachine.ts`（状态机 v2：五态 / 流转白名单 / blocked 三件套 / 停滞判据，纯函数）、`src/board.ts`（读路径**单一真源**：严格读 vs 只读面宽松读）、`src/archive.ts`（终态归档回查）、`src/remote.ts`（Typert Remote 服务 `taskboardRemote`，namespace `taskboard`）、`src/retention.ts`（轮转纯函数）、`src/schedule.ts`（时间提醒）、`src/client/index.ts`（client 插件：`$mount` remote） |
+| 版本 | 0.2.0（git head `7f6979f`） |
+| 挂载位置 | `.dsh/profiles/web/cordis.patch.yml` 的 `insert` 块：行 id `agent-taskboard`、name `dsh-agent-taskboard`、config `boardFile: E:/alice/.taskboard/tasks.json`、`notifyOnPost: false`。⚠ **按行 id 定位、不要按行号**（行号随 patch 变更漂移）；⚠ `mainSessionId` 自 **I18** 起**降级为兜底**——claim 的缺省 assignee 是**调用者会话**，写死的会话 id 会腐化（§5.14 锚点教训） |
+| 状态 | **implemented**（实现落点齐全、26 条验收 17 条已实测；未达 `verified`——`pending≠0`） |
+| 测试 | `tests/{statemachine,board,archive,schedule,retention}.test.mjs` |
 
 ## 1 · 定位与反定位
 
