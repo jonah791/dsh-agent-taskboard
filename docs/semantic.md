@@ -139,6 +139,60 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 - **I9 重复任务不堆积 `[MUST]`**：`repeatMinutes` 任务触发后 `nextAt` 前进到严格大于 now 的下一时刻——错过 N 轮只触发一次，不补偿堆积。
 - **I10 调度失败可见 `[MUST]`**：扫/投递的每次异常都落 `taskboard-trace.jsonl`；`sweep` 回调**必须**包 `guarded()`（逃逸异常 = 宿主死因，§5.24）。
 
+### 4.5 任务状态机 v2 与「状态更新不可静默出错」（2026-09-22 · 主人「改进任务板和工作流，重点围绕任务的状态更新和管理」）
+
+> 一句话：**让状态说实话**——`claimed` 不再同时表示「我在做」「我在等外部」「我卡住了」。
+
+**改版动机（全部为 2026-09-22 实测读数，不是推测）**
+
+| 观测 | 值 | 暴露的缺陷 |
+|---|---|---|
+| 两条 `claimed` 停滞 | `t-3b11f500` 5.3 天 / `t-d426e3f4` 5.6 天，期间无任何痕迹 | **R2 停滞不可测**：插件从不写 `updatedAt`（只有 `createdAt`/`claimedAt`/`doneAt`） |
+| 两条 `claimed` 语义相反 | 一为「等外部首单」（我动不了），一为「判据失效待换判据」（我该动） | **R1 缺 `blocked` 态**：`claimed` 一词装两种相反处境 |
+| `taskboard_list status=done` | 恒 `0` 项 | **R4 终态不可回查**：`TERMINAL_RETAIN_DAYS=0` 即时归档，而**没有任何工具读归档**（`index.ts` 旧注释「可用 taskboard 工具回查」当时是**假话**） |
+| `assignee` | 两条均 = `session-5a785c96-…`（**腐化锚点**，非运行中会话） | **R7 谁在做不可信**：`claim` 无条件写 `config.mainSessionId` |
+| `loadBoard` 读失败 | 静默返回 `{tasks:[]}`，随后 `saveBoard` 整写 | **R8 静默数据销毁**：坏文件在场时一次 `post` 会把整块板覆盖成 1 条 |
+| 双实现漂移 | 面板 `dsh-panel/panels/taskboard.ts` **写** `updatedAt`、缺省 assignee `'alice'`；插件**不写** `updatedAt`、缺省 assignee = `mainSessionId` | **R9 一块板两套语义**（见 U7） |
+
+**状态机（v2 · 五态）**
+
+```
+pending ──claim──▶ claimed ──block──▶ blocked
+   │                  │  ◀──unblock──┘
+   │                  ├──complete──▶ done
+   └──cancel──────────┴──cancel────▶ cancelled
+```
+
+| 状态 | 含义（**互斥**，这是本版的核心） | 必带字段 |
+|---|---|---|
+| `pending` | 未被认领，等有人接手 | — |
+| `claimed` | **我正在做**（近期有活动） | `assignee` / `claimedAt` / `updatedAt` |
+| `blocked` | **我动不了，在等一个具体的东西** | `blockedReason` / `nextAction` / `reviewAt` / `updatedAt` |
+| `done` / `cancelled` | 终态（出板归档） | `doneAt`（done）/ `summary` |
+
+**流转白名单（`src/statemachine.ts`，纯函数）** `[MUST]`——**未列出的流转一律抛错**，不静默改状态：
+
+| from | 允许的 to |
+|---|---|
+| `pending` | `claimed` · `cancelled` |
+| `claimed` | `pending`（**释放**：认领后发现不该我做——2026-09-22 dogfooding 补的缺口）· `blocked` · `done` · `cancelled` |
+| `blocked` | `claimed` · `cancelled` |
+| `done` / `cancelled` | `pending`（**重开**：必须带 reason）——终态不可被任何路径**静默**复活；本行原写「（无）」，2026-09-22 与实现对齐 |
+
+**「下次动作」的显式承诺**：`blocked` 必带 `nextAction`（下次做什么）+ `reviewAt`（何时再看一眼）。二者与既有提醒面（`remindAt`/`nextAt`）打通：`reviewAt` 到点进 `taskboard_status` 的「待复查」段。
+⇒ 我先前手工给两条停滞任务设 `repeatMinutes:1440` 提醒，本质是**缺这个字段的 workaround**——机制该自带的东西不该由手工纪律补。
+
+**不变量**
+
+- **I11 读失败必须响亮 `[MUST]`**：`loadBoard` 仅在**文件不存在**（ENOENT）时返回空板；**解析失败 / IO 错误一律抛错**。理由：静默空板 + 后续 `saveBoard` = **整板被覆盖**。可测量：喂坏 JSON → 断言抛错，且 `tasks.json` 字节数与 mtime **均不变**。
+- **I12 未列出的流转必拒 `[MUST]`**：可测量：`pending→done`、`blocked→done`、`done→claimed` 均抛错；`done→pending` **无 reason 抛错**、带 reason 放行；`claimed→pending`（释放）放行。
+- **I13 `blocked` 必带承诺 `[MUST]`**：缺 `blockedReason` / `nextAction` / `reviewAt` 任一 ⇒ 抛错（「卡住了」必须说清：卡在哪、下次做什么、何时再看）。
+- **I14 每次状态变更刷新 `updatedAt` `[MUST]`**：`post`/`claim`/`block`/`unblock`/`complete`/`cancel`/`update` 七条路径全部刷新——I15 的停滞判据依赖它。
+- **I15 停滞可见 `[MUST]`**：非终态且 `now - updatedAt > STALE_DAYS`（缺省 3 天）⇒ 进 `taskboard_status.stale`（含停滞天数）。可测量：喂 `updatedAt` 4 天前的 `claimed` 样本 → 必须出现在 `stale`；喂刚更新的样本 → **必须不在**（对照组，防「恒报」）。
+- **I16 终态可回查 `[MUST]`**：`taskboard_archive` 能列出/读取 `archive/terminal-*.json`（按日期、按 id）；且 `taskboard_list` 在终态查询无结果时**必须在消息里指明「终态已归档，用 taskboard_archive 回查」**——不再让调用者把「空结果」读成「没有完成的任务」。
+- **I17 完成路径唯一 `[MUST]`**：`taskboard_complete` 与 `taskboard_update{status:'done'}` 走**同一个内部完成函数**（`doneAt` + `summary` + 记忆回流），不允许两条路径产出不同结果。
+- **I18 `assignee` 取调用者 `[MUST]`**：缺省 assignee = **调用者会话 id**（`exec.agent.session.id`，与 §5.18 触发者绑定同源）；`mainSessionId` 仅在调用者不可得时兜底，且**该兜底必须可被审计**（trace 记 `assignee-source: caller|anchor`）。
+
 
 
 ## 5 · 边界与信任
@@ -193,17 +247,27 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
 | A15 | 冷路径：投递失败不吞（状态不动 + 下轮重试）、坏板不崩、无到点项零 IO | 单测：`sweepOnce` 三个退化样本（`deliver:'failed'` / `load:{}` / 未来时刻） | **已实测** |
 | A16 | 线上真调：设提醒 → 到点真投递**且消息落进会话** | 2026-09-20 15:12 实测：`taskboard_post {remindAt:'+1m'}` → 15:13:50 痕迹 `deliver … via=bound` + `sweep due=1 fired=1 failed=0`；板面 `lastFiredAt`/`fireCount=1`/`notifySession=session-005ddf46-…`（**本会话**，触发者绑定生效）；**且提醒消息确实出现在会话里**（`【任务板·提醒】自检：…——到点了，是否处理由我判断（插件不代做）`）⇒ 投递链路 Model-visible ⟺ logged 成立 | **已实测**（重启生效后线上，含消息落地） |
 | A17 | 痕迹可答「断在哪一段」 | `.taskboard/taskboard-trace.jsonl` 三行实录：`post`（含 remindAt）/ `deliver`（含 `via`/`fireCount`）/ `sweep`（含 `due/fired/failed`）；失败面另有 `deliver-error`/`sweep-error`/`save-error` | **已实测** |
+| A18 | **读失败必须响亮**（I11）：坏板面不得被读成空板（否则下次写入覆盖整板） | `node --test tests/board.test.mjs`：坏 JSON / 顶层非对象 / 缺 `tasks` 数组 各断言抛错且消息含「拒绝以空板继续」；ENOENT → 空板；EACCES → 抛错；对照组正常板面读得回 | **已实测**（2026-09-22 · 6/6） |
+| A19 | **非法流转必拒**（I12）：未列出的流转抛错；终态重开必须带 reason | `node --test tests/statemachine.test.mjs`：`done→claimed` / `pending→done` / `blocked→done` 抛错；`done→pending` 无 reason 抛错；**白名单内每一条放行**（防「全拒」伪装成合格） | **已实测**（2026-09-22） |
+| A20 | **blocked 三件套齐全**（I13）：缺 `blockedReason`/`nextAction`/`reviewAt` 任一即拒 | 单测：三字段各缺一次断言抛错；齐了放行 | **已实测**（2026-09-22） |
+| A21 | **每次状态变更刷新 `updatedAt`**（I14） | 线上真调后读板面：`updatedAt` 前进；纯内容更新（改描述）同样刷新 | **待线上验收**（重启后真调） |
+| A22 | **停滞可见**（I15）：超阈值必报、未超阈值必沉默、终态必排除 | 单测：5 天前样本必现 + 1 小时前样本必不现 + `done`/`cancelled` 必不现（**三组对照**）；真数据：现存 11 条中**精确命中 2 条 claimed**（5.7 / 5.3 天），9 条 pending **零误报** | **已实测**（2026-09-22 · 单测 + 真板面） |
+| A23 | **终态可回查**（I16）：归档能列能读；空结果必须指明方向 | 单测 `tests/archive.test.mjs`（解析/跨文件去重/三路过滤/坏文件/ENOENT）；真数据：9 个归档文件、**62 条**去重终态、坏文件 0，最近 5 条 = 2026-09-22 结案的 5 项 | **已实测**（2026-09-22） |
+| A24 | **完成路径唯一**（I17）：工具面两条路 + GUI 面共用同一文本形状 | 单测：`completionMemoryText` 空摘要不留空段；源码级：三条路径均引用同一函数（无第二份文本拼接） | **已实测**（2026-09-22） |
+| A25 | **`assignee` 取调用者**（I18）：缺省写调用者会话，锚点仅兜底且留痕 | 线上真调 `taskboard_claim` 后读板面 `assignee` = 当前会话 id；trace 含 `assignee-source` | **待线上验收**（重启后真调） |
+| A26 | **状态变更留痕**（审计面）：每次流转落 `status-change` | 线上真调后 `grep status-change .taskboard/taskboard-trace.jsonl` 见 `from`/`to`/`by`/`reason` | **待线上验收**（重启后真调） |
 
 ## 8 · 与实现的关系
 
-- **主实现**：`src/index.ts`（工具面 + 通知 + 轮转接线）。**服务层**：`src/remote.ts`（GUI 数据通道）。**纯函数层**：`src/retention.ts`。
+- **主实现**：`src/index.ts`（工具面 + 通知 + 轮转接线）。**服务层**：`src/remote.ts`（GUI 数据通道）。**纯函数层**：`src/retention.ts`（终态轮转）、`src/schedule.ts`（时间提醒）、`src/statemachine.ts`（状态机 v2：白名单/停滞/blocked 校验）、`src/archive.ts`（归档回查）、`src/board.ts`（板面读写单一真源）。
 - **同语义副本（I1）**：无。GUI 页面 `self-plugins/dsh-panel/panels/taskboard.ts` 是本板面的**视图**，不是第二份语义（其语义主副本在 `dsh-panel/docs/semantic.md`）。
 - **未实现 / 未验证部分（显式标注）**：
   1. **无并发写保护**：`loadBoard → 改 → saveBoard` 之间无文件锁（并行实例同时改会丢更新）——未验证的**已知风险**，见 U1。
   2. 通知静默失败（§5 失败面）无存活证据（无 `notifiedCount` 落盘）。
   3. `notifyOnPost` 在 profile 中为 `false` → **实际生产不广播**（工具返回值仍报「任务已发布」）；语义上「发布即通知」与线上配置不一致，以配置为准。
 - **生效判据**（改了代码后怎么证明真的生效）：
-  1. **产物 vs 进程**：`self-plugins/dsh-agent-taskboard/lib/index.js` mtime 必须早于 web 进程启动时间（当前 09-13 16:05:24 < 09-14 10:05:47 ✓ live）。
+  1. **产物 vs 进程**：`lib/*.js` 的 mtime 必须早于 web 进程启动时间——判据用 `plugin_boot_status` **现读**（本行原先写死了 09-13/09-14 两个历史值，写死一次就过期一次；这正是 §5.9·6「读数必须自带范围标注」在文档里的应用）。
+  1b. **新工具可答**：`taskboard_block` / `taskboard_archive` 出现在工具面上（它们只在本版之后才存在 ⇒ 见到即证明新构建已加载）。
   2. **落盘物证**：调一次 `taskboard_status` 后 `ls .taskboard/tasks.json` 的 mtime 应前进（读时轮转也会写盘）；归档目录出现新 `terminal-<今天>.json`。
   3. **工具可答**：`taskboard_status` / `taskboard_list` 出现在工具面并可返回 `counts`。
 - **回退**：
@@ -245,12 +309,26 @@ GUI（面板宿主）──/api/taskboard/{list,status,mutate}──▶ Taskboar
   读 D4 的正确姿势：**先 grep 标题、再看内容**——不要凭报错文字直接下「补内容」的任务单（本任务的原描述就写成了「补缺失的第 5 节」，是误读）。
 - 语义**被修正（声明 vs 事实）**：状态由 `draft` 改为 `implemented`——实现落点齐全、17 条验收 11 条已实测。**未标 `verified`**：`pending=6 ≠ 0`（§5.20 规则 4 硬判据）。声明状态应与现算状态一致，否则是「声明≠事实」的慢性病。
 
+**2026-09-22 状态机 v2：从「状态会说谎」到「状态更新不可静默出错」（主人「改进任务板和工作流，重点围绕任务的状态更新和管理」）**
+
+- **触发证据（先取证再动手）**：两条 `claimed` 在板上已停滞 **5.3 / 5.6 天**而机制一声不响，且二者含义**恰好相反**——一条「等外部首单」（我动不了），一条「判据失效待换」（我该动）。⇒ 真因**不是**「我忘了更新状态」，而是**状态模型缺态 + 停滞不可测**；所以修的是布线，不是更努力地记住（§5.10：默认行为由布线决定，不由意志决定）。
+- 语义**被补充（新契约面 §4.5）**：五态状态机（新增 `blocked`）、流转白名单、`blocked` 三件套承诺、`updatedAt` 纪律、停滞判据、归档回查工具；新增不变量 **I11–I18** 与验收 **A18–A26**。
+- 语义**被修正（两处「宽容」其实是数据销毁）**：工具面 `loadBoard` 与 GUI 面 `remote.load` **各自**都写 `catch { return [] }`，而调用方紧接着 `save(…)` ⇒ 文件一旦损坏，一次操作就把**整块板**覆盖成一条。改为 `src/board.ts` 单一真源（读路径可退化、写路径绝不可以）。**教训：「宽容的读」处在带写回的链路上时，等价于删除。**
+- 语义**被修正（同一件事三种写法）**：完成路径原本一条写摘要 + 回流记忆、另一条两样都没有，GUI 面还有第三套（可静默复活终态）。现统一到 `changeStatus` + `completionMemoryText`。**教训：状态更新的正确性必须由机制保证，不能靠「记得走哪条路」。**
+- 语义**被补充（工具面）**：新增 `taskboard_block`、`taskboard_archive`；`taskboard_status` 增 `stale` 与 `due` 两段；`taskboard_list` 在终态查询为空时给出归档指引（原先调用者会把「空」读成「没完成过」）。
+- **未收口的部分如实标注**：面板 `dsh-panel/panels/taskboard.ts` 是第三套实现（U7）；client 枚举与 schema 未同步（U8）；`staleDays` 全局单值（U9）。
+- 教训（待回写技能）：**「状态字段只有一个当前值」的模型一定会失真**——缺的从来不是纪律，而是「最后活动时刻」与「下次动作承诺」这两个字段。
+- **dogfooding 当场发现自己的设计漏洞（上线 1 小时后）**：为验证 I18 领取了一条新任务，想退回时发现白名单**没有 `claimed → pending`**——「认领错了」没有出路，只能挂着 `claimed` 装活或谎报 `blocked`。⇒ 补上**释放**边（不需 reason；终态重开才需要）。**教训：状态机的**出边**必须覆盖真实处境的每一种收场**；只有「向前」没有「撤回」的白名单，会亲手制造它想消灭的那种失真。**这条缺口是被「上线后立刻拿真任务走一遍」抓到的，不是被单测抓到的**——判据能测出「非法流转被拒」，测不出「合法处境没有对应流转」。
+
 ## 10 · 未决问题
 
 - **U1 并发写保护**：`loadBoard/saveBoard` 无锁，两个并行实例同时 `claim` 同一任务会丢更新（§5.14 并行是常态工况）。倾向：写前 `statSync` 比对 mtime + 冲突重试，或改用追加式日志 + 折叠视图。需要主人裁决是否值得工程投入。
-- **U2 读失败静默返回空板**：与「坏数据一律放行 + 落 issue」的纪律不符——建议加 `console/logger.warn` + 计数落盘（现存 `tasks.json` 被误删时目前**完全无声**）。
-- **U3 `mainSessionId` 锚点腐化**：值为 `session-5a785c96-…`（09-13 的会话），而通知主路径已改为遍历 live agents；是否把锚点从「默认 assignee」职责中也去掉（改为「当前发起者」）？
+- **U2 读失败静默返回空板** —— ✅ **已解决（2026-09-22 · I11）**：抽 `src/board.ts` 作单一真源，**读路径可退化、写路径绝不可以**；严格读的失败理由里写明「拒绝以空板继续」。判据 A18（含尸体样本）。
+- **U3 `mainSessionId` 锚点腐化** —— ✅ **已解决（2026-09-22 · I18）**：`claim` 缺省 assignee 改为**调用者会话**（`exec.agent.session.id`），锚点仅兜底且 `assignee-source` 入 trace。判据 A25。
 - **U4 与 `dsh-agent-teams` 的职责边界**：分身派发记录是否必须写进任务板（当前是约定非机制）？
 - **U5 提醒的「唤醒」语义要主人拍板（2026-09-20 新增）**：`wake=true` 会**启动一次模型 turn**（真花钱）。当前默认 `remindWakeup=true`（主人明确要「时间提醒」，不唤醒的提醒等于没提醒），且**每个任务可单独设 `wake`**。若预算优先，可把 profile 里的 `remindWakeup` 改 `false`（提醒照常落消息，只是不主动唤醒）——**取舍归主人**。
 - **U6 提醒与 life-core 感知圈的职责重叠（2026-09-20 新增）**：两者都能「到点叫醒我」。当前分工：任务板的提醒**绑任务**（有 `taskId`、有交付面），life-core 管**存在性节律**（感知圈/睡眠）。倾向：保持分工、不互相实现；若将来合并，必须保留「任务提醒」这一语义（否则任务的时间承诺失去归属）。
+- **U7 状态机仍有三处实现（2026-09-22 新增 · 本轮只收口了两处）**：工具面 `src/index.ts`、GUI 面 `src/remote.ts`、面板 `dsh-panel/panels/taskboard.ts` 各自维护流转。本轮把前两者的**白名单与 `updatedAt` 纪律**统一到 `src/statemachine.ts`，但**面板是第三份**——跨插件导入被生态闸门禁止，正解是让面板调 `/api/taskboard/mutate` 而不是自己重实现。另：面板缺省 `assignee` 是字面量 `'alice'`（本插件是调用者会话）、面板计数与展示未含 `blocked`。**需要主人裁决是否值得工程投入**。
+- **U8 GUI/客户端枚举未同步（2026-09-22 新增 · 有意为之）**：`src/client/TaskboardAction.tsx` 的 `STATUS_META` 仍只有四态（`blocked` 会落到 `pending` 的样式），`src/client/remote.ts` 的 zod schema 会**剥掉** `updatedAt`/`blockedReason`/`nextAction`/`reviewAt` 新字段。鉴于 §1 已记载「GUI 槽位 2026-09-13 撤除」，本轮**有意不改死界面**；若 GUI 复活，必须一并补枚举与 schema。**未验证**（本轮未在界面上实际打开确认槽位确实不存在，仅依据 §1 的既有记载）。
+- **U9 停滞阈值是全局常量（2026-09-22 新增）**：`staleDays` 缺省 3 天、按 config 全局生效。但任务节奏差异大（长期任务 vs 当天活），一个阈值必然对某一类偏松或偏紧。倾向：先按全局跑一段，等出现「误报/漏报」的真实样本再考虑按 `type` 分档——**不为想象的需求加旋钮**。
 
