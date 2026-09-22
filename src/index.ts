@@ -27,6 +27,7 @@ import { assertBlockedFields, assertTransition, completionMemoryText, dueReviews
 import type { TaskStatus } from './statemachine.ts'
 // 终态归档回查（I16）：兑现「可用 taskboard 工具回查」那句曾经的假话
 import { filterArchiveTasks, readArchiveDir } from './archive.ts'
+import { missingCardText, renderCardText } from './cardview.ts'
 // 板面读写的单一真源（I11）：读路径可退化、写路径绝不可以
 import { readBoardStrict } from './board.ts'
 import { join, dirname } from 'node:path'
@@ -515,6 +516,41 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
+  // ---------- taskboard_show（新增 · 2026-09-22）：卡片正文必须能**读回** ----------
+  // 缺口（t-7238ff6a）：此前只有写没有读——正文只能写不能读，而 taskboard_update 的
+  // description 是**整体替换** ⇒ 一次自以为「补充说明」的更新会把原始判据抹掉且无痕迹。
+  // 与我今天修的 I11 同族：**缺失/宽容的读，处在带写回的链路上 = 删除**。
+  ctx.tools.register(defineTool({
+    name: 'taskboard_show',
+    description: '读回一张任务的**全文**（标题/正文/状态/优先级/标签/负责人/各时间戳/阻塞三件套）。写之前先读：taskboard_update 的 description 是**整体替换**，不先读回就改会把原始判据整段覆盖。终态任务完成即出板——回查用 taskboard_archive。',
+    parameters: {
+      id: { type: 'string', required: true, description: '任务 id（如 t-1a2b3c4d）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          found: { type: 'boolean', required: true },
+          id: { type: 'string', required: true },
+          card: { type: 'json' },
+          text: { type: 'string', required: true },
+        },
+      },
+      render: (_a, v) => [{ type: 'text', text: String(v.text ?? '') }],
+    },
+    async execute(args: { id: string }) {
+      const board = loadBoard(boardPath)
+      const t = board.tasks.find((x) => x.id === args.id)
+      if (t === undefined) {
+        return { found: false, id: args.id, text: missingCardText(args.id) }
+      }
+      // 渲染是**纯函数单源**（`cardview.ts`，有逐字符全等的离线测例）——
+      // 工具面只做 IO，不再自己拼字符串（拼在这里就测不到，而它恰恰是「读回一致性」的判据本体）。
+      return { found: true, id: t.id, card: JSON.parse(JSON.stringify(t)), text: renderCardText(t, ageSuffix(t)) }
+    },
+  }))
+
   // ---------- taskboard_claim ----------
   ctx.tools.register(defineTool({
     name: 'taskboard_claim',
@@ -618,7 +654,7 @@ export function apply(ctx: Context, config: Config): void {
   // ---------- taskboard_update ----------
   ctx.tools.register(defineTool({
     name: 'taskboard_update',
-    description: '更新任务（标题/描述/优先级/标签/状态流转）。状态流转走**白名单校验**（I12）：未列出的流转会抛错；重开终态必须带 reason。status=blocked 时必须带齐 blockedReason/nextAction/reviewAt。',
+    description: '更新任务（标题/描述/优先级/标签/状态流转）。状态流转走**白名单校验**（I12）：未列出的流转会抛错；重开终态必须带 reason。status=blocked 时必须带齐 blockedReason/nextAction/reviewAt。⚠ **description 是整体替换**（不是追加）——改之前请先用 taskboard_show 读回原文，否则会把原始判据整段覆盖且无痕迹；只想补充请把原文一并带上。',
     parameters: {
       taskId: { type: 'string', required: true, description: '任务 id' },
       title: { type: 'string', description: '新标题' },
