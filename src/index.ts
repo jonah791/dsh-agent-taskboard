@@ -40,6 +40,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { TaskboardRemoteService } from './remote.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-taskboard': { kind: 'dsh-agent-taskboard' }
+  }
+}
+
 export const name = 'agent-taskboard'
 // memoryApi：可选回流服务（dsh-agent-memory 提供；任务完成摘要回流主记忆库）
 export const inject = ['tools', 'agents', 'memoryApi'] as const
@@ -288,7 +294,7 @@ export function apply(ctx: Context, config: Config): void {
   const deliverReminder = (task: SchedulableTask, text: string): 'bound' | 'broadcast' | 'failed' => {
     const make = () => createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' },
+      source: { kind: 'dsh-agent-taskboard' },
     })
     const wake = task.wake ?? config.remindWakeup
     const seen = new Set<string>()
@@ -359,7 +365,7 @@ export function apply(ctx: Context, config: Config): void {
         agent.send(
           createUserMessage({
             content: [{ type: 'text', text }],
-            source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' },
+            source: { kind: 'dsh-agent-taskboard' },
           }),
           'next-turn',
           false, // wakeup=false：排队不打断
@@ -370,7 +376,7 @@ export function apply(ctx: Context, config: Config): void {
         ctx.agents.get(config.mainSessionId as SessionId)?.send(
           createUserMessage({
             content: [{ type: 'text', text }],
-            source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' },
+            source: { kind: 'dsh-agent-taskboard' },
           }),
           'next-turn',
           false,

@@ -25,14 +25,23 @@ const C = {
   short: '#5b8cff',
   long: '#a78bfa',
 }
-const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
+/**
+ * 元数据表用「单一真源 + 两种访问面」：`as const` 实体给出**确定的**点访问类型
+ * （`STATUS_META_VALUES.pending` 不带 undefined），`Record` 别名保住按任意 string 索引的能力
+ * （`STATUS_META[task.status]`）。只留 Record 的话，`noUncheckedIndexedAccess` 会让**点访问**
+ * 也带 undefined ⇒ `?? STATUS_META.pending` 的兜底值本身就是 undefined，兜底失效。
+ */
+const STATUS_META_VALUES = {
   pending: { label: '待办', color: '#8ab4ff', bg: 'rgba(90,140,255,.14)' },
   claimed: { label: '进行中', color: '#ffb057', bg: 'rgba(255,176,87,.14)' },
   done: { label: '已完成', color: '#5fd08a', bg: 'rgba(95,208,138,.14)' },
   cancelled: { label: '已取消', color: '#9aa3b5', bg: 'rgba(154,163,181,.14)' },
-}
-const PRI_COLOR: Record<string, string> = { high: '#ff5f56', normal: '#ffb057', low: '#5fd08a' }
-const PRI_LABEL: Record<string, string> = { high: '高', normal: '中', low: '低' }
+} as const
+const STATUS_META: Record<string, { label: string; color: string; bg: string }> = STATUS_META_VALUES
+const PRI_COLOR_VALUES = { high: '#ff5f56', normal: '#ffb057', low: '#5fd08a' } as const
+const PRI_COLOR: Record<string, string> = PRI_COLOR_VALUES
+const PRI_LABEL_VALUES = { high: '高', normal: '中', low: '低' } as const
+const PRI_LABEL: Record<string, string> = PRI_LABEL_VALUES
 
 function fmtTime(iso: string): string {
   if (!iso) return ''
@@ -124,8 +133,8 @@ export function TaskboardAction({ remote }: TaskboardActionProps & { remote?: an
         <div style={{ fontSize: '12px', color: C.textDim, padding: '10px 2px', textAlign: 'center' }}>{empty}</div>
       ) : (
         arr.map((task) => {
-          const sm = STATUS_META[task.status] ?? STATUS_META.pending
-          const pc = PRI_COLOR[task.priority] ?? PRI_COLOR.normal
+          const sm = STATUS_META[task.status] ?? STATUS_META_VALUES.pending
+          const pc = PRI_COLOR[task.priority] ?? PRI_COLOR_VALUES.normal
           return (
             <div key={task.id} data-task-id={task.id} style={{ display: 'flex', gap: '9px', padding: '7px 6px', borderRadius: '9px', margin: '1px 0', transition: 'background .12s ease', cursor: 'default', borderLeft: '3px solid ' + sm.color, background: 'rgba(127,127,127,.04)' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -211,9 +220,9 @@ export function TaskboardAction({ remote }: TaskboardActionProps & { remote?: an
               <button style={seg(type === 'short', C.short)} onClick={() => setType('short')}>短期</button>
               <button style={seg(type === 'long', C.long)} onClick={() => setType('long')}>长期</button>
               <span style={{ flex: 1 }} />
-              <button style={seg(priority === 'low', PRI_COLOR.low)} onClick={() => setPriority('low')}>低</button>
-              <button style={seg(priority === 'normal', PRI_COLOR.normal)} onClick={() => setPriority('normal')}>中</button>
-              <button style={seg(priority === 'high', PRI_COLOR.high)} onClick={() => setPriority('high')}>高</button>
+              <button style={seg(priority === 'low', PRI_COLOR_VALUES.low)} onClick={() => setPriority('low')}>低</button>
+              <button style={seg(priority === 'normal', PRI_COLOR_VALUES.normal)} onClick={() => setPriority('normal')}>中</button>
+              <button style={seg(priority === 'high', PRI_COLOR_VALUES.high)} onClick={() => setPriority('high')}>高</button>
               <button onClick={() => void post()} style={{ border: 'none', borderRadius: '8px', padding: '4px 14px', fontSize: '12px', fontWeight: 700, cursor: 'pointer', background: 'linear-gradient(135deg, #4a7dff, #7a5cff)', color: '#fff', opacity: busy ? .6 : 1 }}>
                 发布
               </button>

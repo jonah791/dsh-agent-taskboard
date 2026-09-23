@@ -5,7 +5,8 @@
  * （动态插件的 inject 在 mount 后解析，boot 不卡）。
  * @module dsh-agent-taskboard/client
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// 0.1.7 契约：聚合包 `dsh-client-runtime/client` 已被上游移除；ClientContext 回到属主 @deepseek-ai/cordis
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { TaskboardAction } from './TaskboardAction.tsx'
 import TYPERT_REMOTE from './remote.ts'

@@ -16,6 +16,12 @@ import { assertTransition, completionMemoryText } from './statemachine.ts'
 // 板面读写单一真源（I11）——不再在本文件里重写一份宽松读
 import { readBoardLenient, readBoardStrict } from './board.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-taskboard': { kind: 'dsh-agent-taskboard' }
+  }
+}
+
 export interface TaskboardRemoteConfig {
   boardFile: string
   /** 宿主主会话 id（新任务提醒目标）。 */
@@ -61,12 +67,12 @@ export class TaskboardRemoteService extends TypertRemoteService {
       const agents = (this.ctx as any).agents?.list?.() as Agent[] | undefined
       if (Array.isArray(agents)) {
         for (const agent of agents) {
-          agent.send(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' } }), 'next-turn', false)
+          agent.send(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'dsh-agent-taskboard' } }), 'next-turn', false)
         }
       } else if (this.cfg.mainSessionId) {
         // 无 list 接口时回退单会话
         const agent = (this.ctx as any).agents?.get?.(this.cfg.mainSessionId as SessionId) as Agent | undefined
-        agent?.send(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-agent-taskboard' } }), 'next-turn', false)
+        agent?.send(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'dsh-agent-taskboard' } }), 'next-turn', false)
       }
     } catch { /* 通知失败静默 */ }
   }

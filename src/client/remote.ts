@@ -12,10 +12,10 @@ const taskSchema = z.object({
   summary: z.string().optional(),
 })
 
-const listResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#ListResult', schema: z.object({ tasks: z.array(taskSchema) }) }
-const statusResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#StatusResult', schema: z.object({ counts: z.record(z.string(), z.number()) }) }
-const mutateRequest: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#MutateRequest', schema: z.object({ taskId: z.string().optional(), action: z.string(), title: z.string().optional(), description: z.string().optional(), type: z.string().optional(), priority: z.string().optional(), summary: z.string().optional(), assignee: z.string().optional() }) }
-const mutateResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#MutateResult', schema: z.union([z.object({ ok: z.literal(true), task: taskSchema.optional() }), z.object({ ok: z.literal(false), error: z.string() })]) }
+const listResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#ListResult', create: () => z.object({ tasks: z.array(taskSchema) }) }
+const statusResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#StatusResult', create: () => z.object({ counts: z.record(z.string(), z.number()) }) }
+const mutateRequest: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#MutateRequest', create: () => z.object({ taskId: z.string().optional(), action: z.string(), title: z.string().optional(), description: z.string().optional(), type: z.string().optional(), priority: z.string().optional(), summary: z.string().optional(), assignee: z.string().optional() }) }
+const mutateResult: TypertCodec = { mode: 'strict', typeSymbol: 'taskboard#MutateResult', create: () => z.union([z.object({ ok: z.literal(true), task: taskSchema.optional() }), z.object({ ok: z.literal(false), error: z.string() })]) }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespaceMap {
