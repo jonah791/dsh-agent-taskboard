@@ -82,6 +82,21 @@ test('tags 为空数组 → 显式「（无）」而不是空标签行', () => {
   assert.ok(renderCardText({ ...base, tags: undefined }, '').includes('标签 （无）'))
 })
 
+test('合法出边：出现在状态行之后、标签行之前（位置即语义）', () => {
+  const got = renderCardText({ ...base, status: 'blocked', transitions: ['claimed', 'cancelled'] }, '')
+  const lines = got.split(String.fromCharCode(10))
+  assert.equal(lines[1], '状态 blocked · 优先级 normal')
+  assert.equal(lines[2], '可流转 claimed / cancelled')
+  assert.equal(lines[3], '标签 （无）')
+})
+
+test('合法出边：缺省或空数组时**不出行**（与空值纪律一致），给了就必须出现', () => {
+  assert.equal(renderCardText({ ...base }, '').includes('可流转'), false, '缺省不得凭空出行')
+  assert.equal(renderCardText({ ...base, transitions: [] }, '').includes('可流转'), false, '空数组同缺省')
+  // 对照组：给了就必须出现（否则「一律不显示」也能让上面两条全绿）
+  assert.ok(renderCardText({ ...base, transitions: ['claimed'] }, '').includes('可流转 claimed'))
+})
+
 test('卡不在板上：提示必须指向归档（否则「不在板」会被读成「从未存在」）', () => {
   const m = missingCardText('t-deadbeef')
   assert.ok(m.includes('t-deadbeef'))

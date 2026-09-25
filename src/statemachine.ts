@@ -60,6 +60,18 @@ export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
 }
 
 /**
+ * 当前状态的**合法出边**（白名单现算的唯一读取口）——供卡片显示与工具层拒绝消息共用。
+ *
+ * 为什么不各写各的文案：白名单只有一个真源（`TRANSITIONS`），任何抄一份常量的地方都会漂移。
+ * 2026-09-25 实测代价：`taskboard_claim` / `taskboard_complete` 各自手写校验消息，
+ * 只说「本工具要求什么」，**不说当前状态能往哪走** ⇒ 调用者只能翻文档或试错
+ * （而 `assertTransition` 的消息本来就含允许集合，工具层却绕过了它）。
+ */
+export function allowedTransitions(from: string): readonly TaskStatus[] {
+  return isTaskStatus(from) ? TRANSITIONS[from] : []
+}
+
+/**
  * 断言流转合法，否则抛错（I12）。
  * @param from - 当前状态
  * @param to - 目标状态

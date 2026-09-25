@@ -26,6 +26,8 @@ export interface CardView {
   nextAction?: string
   reviewAt?: string
   remindAt?: string
+  /** 当前状态的**合法出边**（由调用方从 `TRANSITIONS` 现算后注入——本层不 import 插件内部）。 */
+  transitions?: readonly string[]
 }
 
 const NL = String.fromCharCode(10)
@@ -46,8 +48,11 @@ export function renderCardText(t: CardView, ageText: string): string {
   const lines: string[] = [
     '【' + t.id + '】' + t.title,
     '状态 ' + t.status + ' · 优先级 ' + t.priority + ageText,
-    '标签 ' + ((t.tags ?? []).join(' ') || '（无）'),
   ]
+  // 合法出边**由调用方现算后注入**（同 ageText 的注入口径）：本层不 import 插件内部、不手写常量。
+  const outs = t.transitions ?? []
+  if (outs.length > 0) lines.push('可流转 ' + outs.join(' / '))
+  lines.push('标签 ' + ((t.tags ?? []).join(' ') || '（无）'))
   if (present(t.assignee)) lines.push('负责人 ' + t.assignee)
   if (present(t.blockedReason)) lines.push('⛔ 卡在 ' + t.blockedReason)
   if (present(t.nextAction)) lines.push('下次动作 ' + t.nextAction)

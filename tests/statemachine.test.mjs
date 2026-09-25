@@ -7,6 +7,7 @@ import {
   TASK_STATUSES,
   TERMINAL_STATUSES,
   TRANSITIONS,
+  allowedTransitions,
   assertBlockedFields,
   assertTransition,
   canTransition,
@@ -107,6 +108,17 @@ test('I12 释放路径：claimed → pending 必须允许（认领不是不可�
   assert.doesNotThrow(() => assertTransition('claimed', 'pending'))
   assert.equal(needsReason('claimed', 'pending'), false, '释放不需要 reason（终态重开才需要）')
   assert.equal(needsReason('done', 'pending'), true)
+})
+
+test('allowedTransitions：逐状态与白名单全等（防漂移）+ 未知状态 fail-safe 返回空', () => {
+  for (const s of TASK_STATUSES) {
+    assert.deepEqual([...allowedTransitions(s)], [...TRANSITIONS[s]], s + ' 的出边必须等于白名单（不许有第二份常量）')
+  }
+  // blocked 是 2026-09-25 实测踩到的那条：工具层只说「仅 claimed 可完成」，不说能往哪走
+  assert.deepEqual([...allowedTransitions('blocked')], ['claimed', 'cancelled'])
+  // 未知状态不给出边：宁可不提示，也不提示错的
+  assert.deepEqual([...allowedTransitions('nonsense')], [])
+  assert.deepEqual([...allowedTransitions('')], [])
 })
 
 test('状态枚举与终态判定自洽', () => {

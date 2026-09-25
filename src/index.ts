@@ -23,7 +23,7 @@ import { parseWhen, scheduledAt, sweepOnce, errText } from './schedule.ts'
 import type { SchedulableTask, SweepBoard } from './schedule.ts'
 // 状态机 v2（2026-09-22 主人「改进任务板和工作流，重点围绕任务的状态更新和管理」）：
 // 流转白名单 / 停滞判据 / blocked 三件套——语义正本 docs/semantic.md §4.5 · I11–I18
-import { assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, staleOf } from './statemachine.ts'
+import { allowedTransitions, assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, staleOf } from './statemachine.ts'
 import type { TaskStatus } from './statemachine.ts'
 // 终态归档回查（I16）：兑现「可用 taskboard 工具回查」那句曾经的假话
 import { filterArchiveTasks, readArchiveDir } from './archive.ts'
@@ -31,6 +31,18 @@ import { missingCardText, renderCardText } from './cardview.ts'
 // 板面读写的单一真源（I11）：读路径可退化、写路径绝不可以
 import { readBoardStrict } from './board.ts'
 import { join, dirname } from 'node:path'
+
+/**
+ * 拒绝消息的统一尾巴：把「当前状态能往哪走」直接告诉调用者。
+ *
+ * 白名单**现算**（`allowedTransitions`），不手抄常量。2026-09-25 实测代价：三条工具层校验
+ * 各自手写消息、只说「本工具要求什么」，**不说当前状态能往哪走** ⇒ 调用者只能翻文档或试错
+ * （而 `assertTransition` 的消息本来就含允许集合，工具层却绕过了它）。
+ */
+const outsHint = (status: string): string => {
+  const outs = allowedTransitions(status)
+  return outs.length > 0 ? '——当前状态可流转：' + outs.join(' / ') + '（走 taskboard_update）' : ''
+}
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -553,7 +565,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       // 渲染是**纯函数单源**（`cardview.ts`，有逐字符全等的离线测例）——
       // 工具面只做 IO，不再自己拼字符串（拼在这里就测不到，而它恰恰是「读回一致性」的判据本体）。
-      return { found: true, id: t.id, card: JSON.parse(JSON.stringify(t)), text: renderCardText(t, ageSuffix(t)) }
+      return { found: true, id: t.id, card: JSON.parse(JSON.stringify(t)), text: renderCardText({ ...t, transitions: allowedTransitions(t.status) }, ageSuffix(t)) }
     },
   }))
 
@@ -570,7 +582,7 @@ export function apply(ctx: Context, config: Config): void {
       const board = loadBoard(boardPath)
       const task = board.tasks.find((t) => t.id === args.taskId)
       if (!task) throw new Error('任务不存在：' + args.taskId)
-      if (task.status !== 'pending') throw new Error('任务状态为 ' + task.status + '，不可领取（仅 pending 可领取）')
+      if (task.status !== 'pending') throw new Error('任务状态为 ' + task.status + '，不可领取（仅 pending 可领取）' + outsHint(task.status))
       const picked = args.assignee !== undefined && args.assignee !== ''
         ? { assignee: args.assignee, source: 'explicit' as const }
         : assigneeFor(exec)
@@ -595,7 +607,7 @@ export function apply(ctx: Context, config: Config): void {
       const board = loadBoard(boardPath)
       const task = board.tasks.find((t) => t.id === args.taskId)
       if (!task) throw new Error('任务不存在：' + args.taskId)
-      if (task.status !== 'claimed') throw new Error('任务状态为 ' + task.status + '，仅 claimed 可完成')
+      if (task.status !== 'claimed') throw new Error('任务状态为 ' + task.status + '，仅 claimed 可完成' + outsHint(task.status))
       changeStatus(task, 'done', { by: callerSessionId(exec) })
       const summary = args.summary ?? ''
       task.summary = summary
@@ -645,7 +657,7 @@ export function apply(ctx: Context, config: Config): void {
       // 顺序有意：先解析时刻（非法输入抛错，不静默取 now），再校验三件套齐全（I13）
       const atMs = parseWhen(args.reviewAt, Date.now())
       assertBlockedFields({ blockedReason: args.reason, nextAction: args.nextAction, reviewAt: args.reviewAt })
-      if (task.status !== 'claimed') throw new Error('任务状态为 ' + task.status + '，仅 claimed 可标阻塞（先 claim 再 block）')
+      if (task.status !== 'claimed') throw new Error('任务状态为 ' + task.status + '，仅 claimed 可标阻塞（先 claim 再 block）' + outsHint(task.status))
       changeStatus(task, 'blocked', { by: callerSessionId(exec), reason: args.reason })
       const nextAction = args.nextAction
       const reviewAt = new Date(atMs).toISOString()
