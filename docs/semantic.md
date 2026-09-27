@@ -16,9 +16,7 @@
 
 ## 1 · 定位与反定位
 
-**定位**：一块**跨主体共享的任务板**——主人或任何 agent 可发布任务（JSON 持久化），宿主 agent（爱丽丝）空闲时
-自主领取并完成。它是**协调界面**（AGENTS.md §5.14 rule 4：并行实例靠它协调「谁在做什么」）：
-状态流转 + 看板计数 + 终态轮转归档 + 完成摘要回流记忆库。
+**定位**：一块**跨主体共享的任务板**——主人或任何 agent 可发布任务（JSON 持久化），宿主 agent（爱丽丝）空闲时 自主领取并完成。它是**协调界面**（AGENTS.md §5.14 rule 4：并行实例靠它协调「谁在做什么」）： 状态流转 + 看板计数 + 终态轮转归档 + 完成摘要回流记忆库。
 
 **反定位（本文不管什么）**：
 - **不替 agent 做决策**：发布只发 `wakeup=false` 的**排队通知**（不打断会话），领取/完成时机归 agent 自主（自主性铁律）
@@ -179,8 +177,7 @@ pending ──claim──▶ claimed ──block──▶ blocked
 | `blocked` | `claimed` · `cancelled` |
 | `done` / `cancelled` | `pending`（**重开**：必须带 reason）——终态不可被任何路径**静默**复活；本行原写「（无）」，2026-09-22 与实现对齐 |
 
-**「下次动作」的显式承诺**：`blocked` 必带 `nextAction`（下次做什么）+ `reviewAt`（何时再看一眼）。二者与既有提醒面（`remindAt`/`nextAt`）打通：`reviewAt` 到点进 `taskboard_status` 的「待复查」段。
-⇒ 我先前手工给两条停滞任务设 `repeatMinutes:1440` 提醒，本质是**缺这个字段的 workaround**——机制该自带的东西不该由手工纪律补。
+**「下次动作」的显式承诺**：`blocked` 必带 `nextAction`（下次做什么）+ `reviewAt`（何时再看一眼）。二者与既有提醒面（`remindAt`/`nextAt`）打通：`reviewAt` 到点进 `taskboard_status` 的「待复查」段。 ⇒ 我先前手工给两条停滞任务设 `repeatMinutes:1440` 提醒，本质是**缺这个字段的 workaround**——机制该自带的东西不该由手工纪律补。
 
 **不变量**
 
@@ -192,6 +189,7 @@ pending ──claim──▶ claimed ──block──▶ blocked
 - **I16 终态可回查 `[MUST]`**：`taskboard_archive` 能列出/读取 `archive/terminal-*.json`（按日期、按 id）；且 `taskboard_list` 在终态查询无结果时**必须在消息里指明「终态已归档，用 taskboard_archive 回查」**——不再让调用者把「空结果」读成「没有完成的任务」。
 - **I17 完成路径唯一 `[MUST]`**：`taskboard_complete` 与 `taskboard_update{status:'done'}` 走**同一个内部完成函数**（`doneAt` + `summary` + 记忆回流），不允许两条路径产出不同结果。
 - **I18 `assignee` 取调用者 `[MUST]`**：缺省 assignee = **调用者会话 id**（`exec.agent.session.id`，与 §5.18 触发者绑定同源）；`mainSessionId` 仅在调用者不可得时兜底，且**该兜底必须可被审计**（trace 记 `assignee-source: caller|anchor`）。
+- **I19 拒绝消息与卡片必须给出边 `[MUST]`**（2026-09-25 新增）：任何因状态不合法而拒绝的工具（`taskboard_claim` / `taskboard_complete` / `taskboard_update` 的 block 路径）必须在消息里附上**当前状态的可流转集合**（形如 `——当前状态可流转：X / Y（走 taskboard_update）`）；`renderCardText` 同样输出一行「可流转 …」。该集合一律由 `allowedTransitions(status)` **现算**，**不得手抄常量**（白名单只有一个真源 `TRANSITIONS`）。<br>理由（2026-09-25 实测代价）：三条工具层校验各自手写消息，只说「本工具要求什么」，**不说当前状态能往哪走** ⇒ 调用者只能翻文档或试错——而 `assertTransition` 的消息本来就含允许集合，工具层却绕过了它。<br>可测量：对 `pending` 任务调 `taskboard_complete` ⇒ 错误消息必须含 `可流转：claim / cancel`；对一条卡片调 `taskboard_show` ⇒ 正文必须含「可流转」行。
 
 
 
