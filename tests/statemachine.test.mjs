@@ -17,6 +17,7 @@ import {
   isTerminal,
   lastTouchMs,
   needsReason,
+  sameStateBlockPatch,
   staleOf,
 } from '../lib/statemachine.js'
 
@@ -142,3 +143,33 @@ test('I17 完成摘要文本：三条完成路径共用的形状', () => {
   const bare = completionMemoryText({ id: 't-x', title: '无摘要' }, '   ')
   assert.ok(!bare.includes('\n\n\n'), '空摘要不应产生连续空行')
 })
+
+test('t-4ffcbc0f 同状态 blocked 更新：传了必须写、没传必须缺席（含对照组 + 尸体样本）', () => {
+  // 修复目标：三项全传 ⇒ 三项全进 patch
+  assert.deepEqual(
+    sameStateBlockPatch({ blockedReason: '卡在等授权', nextAction: '问主人', reviewAt: '+2h' }),
+    { patch: { blockedReason: '卡在等授权', nextAction: '问主人', reviewAt: '+2h' }, changed: true },
+  )
+
+  // 关键：只传一项时，未传项必须**缺席**（`in` 为 false），而不是值为 undefined
+  // —— 否则调用点会把旧值覆盖成 undefined，那是「半写」的另一种形态
+  const only = sameStateBlockPatch({ reviewAt: '+1d' })
+  assert.deepEqual(only.patch, { reviewAt: '+1d' })
+  assert.equal('blockedReason' in only.patch, false, '未传字段必须缺席，不得为 undefined')
+  assert.equal('nextAction' in only.patch, false, '未传字段必须缺席，不得为 undefined')
+
+  // 对照组（该沉默的必须沉默）：什么都不传 ⇒ 纯幂等空操作，不得假装更新
+  assert.deepEqual(sameStateBlockPatch({}), { patch: {}, changed: false })
+
+  // 尸体样本（旧实现的等价行为 = 恒空 patch）必须被判假：
+  // 若有人把实现退回「next === task.status 时什么都不做」，本断言立刻红
+  assert.notDeepEqual(
+    sameStateBlockPatch({ blockedReason: 'r', nextAction: 'n', reviewAt: '+2h' }),
+    { patch: {}, changed: false },
+    '尸体样本：恒空 patch 的实现必须被检出',
+  )
+})
+
+// ⚠ 覆盖边界（诚实标注）：以上测的是**决策层纯函数**。`index.ts` 里 execute 的
+// 「同状态 + blocked ⇒ 真的写进 task 并刷新 updatedAt」属**集成层**，本文件测不到
+//（execute 是闭包，依赖 loadBoard/saveBoard）。该层当前靠现场验收，见任务 t-4ffcbc0f。

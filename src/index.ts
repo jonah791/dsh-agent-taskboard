@@ -23,7 +23,7 @@ import { parseWhen, scheduledAt, sweepOnce, errText } from './schedule.ts'
 import type { SchedulableTask, SweepBoard } from './schedule.ts'
 // 状态机 v2（2026-09-22 主人「改进任务板和工作流，重点围绕任务的状态更新和管理」）：
 // 流转白名单 / 停滞判据 / blocked 三件套——语义正本 docs/semantic.md §4.5 · I11–I18
-import { allowedTransitions, assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, staleOf } from './statemachine.ts'
+import { allowedTransitions, assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, sameStateBlockPatch, staleOf } from './statemachine.ts'
 import type { TaskStatus } from './statemachine.ts'
 // 终态归档回查（I16）：兑现「可用 taskboard 工具回查」那句曾经的假话
 import { filterArchiveTasks, readArchiveDir } from './archive.ts'
@@ -706,7 +706,19 @@ export function apply(ctx: Context, config: Config): void {
         if (!isTaskStatus(args.status)) throw new Error('未知状态：' + args.status + '（允许：pending / claimed / blocked / done / cancelled）')
         const next = args.status
         if (next === task.status) {
-          // 同状态：不报错（幂等），但也不假装发生了流转
+          // 同状态：不重复流转（幂等），但**参数不能被吞**——三件套是独立可更新字段。
+          // t-4ffcbc0f：此处原为空操作，导致「已是 blocked 的任务再传三件套」被静默丢弃却返回 ok
+          //（调用方无法从返回值区分全写与半写）。幂等 ≠ 丢参。
+          if (next === 'blocked') {
+            const { patch, changed } = sameStateBlockPatch(args)
+            if (changed) {
+              if (patch.blockedReason !== undefined) task.blockedReason = patch.blockedReason
+              if (patch.nextAction !== undefined) task.nextAction = patch.nextAction
+              if (patch.reviewAt !== undefined) task.reviewAt = new Date(parseWhen(patch.reviewAt, Date.now())).toISOString()
+              // 内容确实变了 ⇒ 刷新 updatedAt（此路径不经 changeStatus，不会重复刷新）
+              task.updatedAt = new Date().toISOString()
+            }
+          }
         } else if (next === 'blocked') {
           const atMs = parseWhen(args.reviewAt ?? '', Date.now())
           assertBlockedFields({ blockedReason: args.blockedReason, nextAction: args.nextAction, reviewAt: args.reviewAt })

@@ -116,6 +116,28 @@ export function assertBlockedFields(input: BlockInput): void {
 }
 
 /**
+ * 同状态（幂等）调用 `taskboard_update` 时，`blocked` 三件套的**部分更新**语义。
+ *
+ * 为什么需要它（t-4ffcbc0f）：`taskboard_update` 的 `next === task.status` 分支原为**空操作**
+ * ⇒ 对**已是 blocked** 的任务再传三件套会被**静默丢弃**、却仍返回「任务已更新」。
+ * 调用方无法从返回值区分「全写」与「半写」（实测 1.6 天后复查才发现 reviewAt 仍是旧值）。
+ * ⇒ **幂等指的是状态不重复流转，不是参数被吞。**
+ *
+ * 语义：只把**显式传入**（`!== undefined`）的字段放进 patch，未传的字段**缺席**
+ * （调用点据此保留旧值，不被 `undefined` 覆盖）。
+ * 分工：本函数管「哪些字段写了」；`assertBlockedFields` 管「承诺是否说清」——
+ * 同状态更新**不**强制三件套齐全（可以只推迟 reviewAt）。
+ * @param input - 调用方传入的三件套
+ */
+export function sameStateBlockPatch(input: BlockInput): { patch: BlockInput; changed: boolean } {
+  const patch: BlockInput = {}
+  if (input.blockedReason !== undefined) patch.blockedReason = input.blockedReason
+  if (input.nextAction !== undefined) patch.nextAction = input.nextAction
+  if (input.reviewAt !== undefined) patch.reviewAt = input.reviewAt
+  return { patch, changed: Object.keys(patch).length > 0 }
+}
+
+/**
  * 完成摘要回流记忆库的**文本形状**（I17 的单一真源）。
  *
  * 为什么放在这里：完成后回流记忆有**三条**入口（工具面 `taskboard_complete`、
