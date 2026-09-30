@@ -709,6 +709,8 @@ export function apply(ctx: Context, config: Config): void {
           // 同状态：不重复流转（幂等），但**参数不能被吞**——三件套是独立可更新字段。
           // t-4ffcbc0f：此处原为空操作，导致「已是 blocked 的任务再传三件套」被静默丢弃却返回 ok
           //（调用方无法从返回值区分全写与半写）。幂等 ≠ 丢参。
+          // t-a8e889a6：本分支现有 **execute 层集成测试**兜底（tests/execute-integration.test.mjs），
+          // 且该测试用尸体样本验证过会红。
           if (next === 'blocked') {
             const { patch, changed } = sameStateBlockPatch(args)
             if (changed) {
