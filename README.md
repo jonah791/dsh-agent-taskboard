@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-agent-taskboard"><img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-27%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-60%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：一块**异步任务板**——主人或任何 agent 把任务写上去（不打断当前会话），宿主 agent 在自己空闲时自主领取、完成、写摘要；每条任务还能**带时间提醒**（到点送达信号，仍不代做）。
