@@ -69,3 +69,26 @@ export function splitTerminalForArchive<T extends RetentionTask>(
   }
   return { keep, archived }
 }
+
+/**
+ * 把新归档的条目**幂等**并入既有归档列表（按 `id` 去重）。
+ *
+ * 事故（2026-11-01）：轮转是**两步写**——先写归档文件、再写板面。若在两步之间被杀，
+ * 板面里仍然留着已归档的终态任务；下次轮转会**把它们再归档一遍**。
+ * 原来的 `[...prev, ...archived]` 直接拼接没有去重，于是归档文件里长出重复 id
+ * （同一条任务在归档里出现两次，回查时看起来像两件事）。
+ *
+ * 修法的选择：**不引入事务**（那要求「两步都不发生」），而是让拼接**幂等**（「发生了也不出错」）。
+ * 按 id 去重便宜得多，且不引入新的状态载体——事务治的是「不会发生」，去重治的是「发生了也没关系」，
+ * 对这个场景后者足够。
+ *
+ * 顺序语义：`prev` 在前、`incoming` 中未出现过的在后。**不做重排**——
+ * 归档是按写入顺序累积的历史，重排会让「第几次轮转进来的」这条信息消失。
+ */
+export function mergeArchived<T extends { id: string }>(
+  prev: readonly T[],
+  incoming: readonly T[],
+): T[] {
+  const seen = new Set(prev.map((t) => t.id))
+  return [...prev, ...incoming.filter((t) => !seen.has(t.id))]
+}

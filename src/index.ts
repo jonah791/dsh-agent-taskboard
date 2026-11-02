@@ -15,9 +15,10 @@
  * 停滞项与待复查阻塞项在 `taskboard_status` 里浮出。语义正本 `docs/semantic.md` §4.5（I11–I18）。
  * @module dsh-agent-taskboard
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from 'node:fs'
 // 终态轮转（2026-09-13 主人：「任务板中完成的，你怎么不删啊」）——见 src/retention.ts 头部事故注释
-import { splitTerminalForArchive } from './retention.ts'
+// mergeArchived（2026-11-01）：两步写之间被杀会让归档长出重复 id，按 id 幂等去重
+import { splitTerminalForArchive, mergeArchived } from './retention.ts'
 // 时间提醒与定时任务（2026-09-20 主人指令）——纯逻辑层，语义见 docs/semantic.md §4.4 / 不变量 I7–I10
 import { parseWhen, scheduledAt, sweepOnce, errText } from './schedule.ts'
 import type { SchedulableTask, SweepBoard } from './schedule.ts'
@@ -30,6 +31,9 @@ import { filterArchiveTasks, readArchiveDir } from './archive.ts'
 import { missingCardText, renderCardText } from './cardview.ts'
 // 板面读写的单一真源（I11）：读路径可退化、写路径绝不可以
 import { readBoardStrict } from './board.ts'
+// 写路径的单一真源（2026-11-01）：三处写入点原本各自 writeFileSync 直接覆盖，
+// 撕裂写会让整块板不可读。见 src/atomic-write.ts 头注（含「为什么不用 fsync」的结论）
+import { writeJsonAtomic } from './atomic-write.ts'
 import { join, dirname } from 'node:path'
 
 /**
@@ -163,13 +167,18 @@ function rotateTerminal(path: string, board: Board): Board {
     try {
       prev = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: unknown[] }
     } catch { /* 当日首建 */ }
-    writeFileSync(file, JSON.stringify({
+    // 幂等去重（2026-11-01）：本函数是**两步写**——先归档、再写板面。
+    // 若在两步之间被杀，板面里仍留着已归档的终态任务，下次轮转会**再归档一遍**；
+    // 原来的 `[...prev, ...archived]` 直接拼接没有去重，于是归档文件里长出重复 id。
+    // 去重逻辑抽到 retention.ts 的 mergeArchived（纯函数，可离线尸体测试）。
+    const prevTasks = Array.isArray(prev.tasks) ? prev.tasks : []
+    writeJsonAtomic(file, {
       archivedAt: new Date().toISOString(),
       note: '任务板终态归档（' + TERMINAL_RETAIN_DAYS + ' 天保留期外）；可用 taskboard 工具回查，恢复=手工并回 tasks.json',
-      tasks: [...(prev.tasks ?? []), ...archived],
-    }, null, 2), 'utf8')
+      tasks: mergeArchived(prevTasks as { id: string }[], archived as unknown as { id: string }[]),
+    })
     const next: Board = { ...board, tasks: keep as Task[] }
-    writeFileSync(path, JSON.stringify(next, null, 2), 'utf8')
+    writeJsonAtomic(path, next)
     return next
   } catch {
     return board
@@ -186,8 +195,8 @@ function loadBoard(path: string): Board {
 }
 
 function saveBoard(path: string, board: Board): void {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(board, null, 2), 'utf8')
+  // 原子写（2026-11-01）：mkdir 由 writeJsonAtomic 内部完成，避免两处各自建目录
+  writeJsonAtomic(path, board)
 }
 
 /**

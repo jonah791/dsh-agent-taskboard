@@ -4,8 +4,7 @@
  */
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import type { Context } from '@deepseek-ai/cordis'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -15,6 +14,9 @@ import type { Task } from './index.ts'
 import { assertTransition, completionMemoryText } from './statemachine.ts'
 // 板面读写单一真源（I11）——不再在本文件里重写一份宽松读
 import { readBoardLenient, readBoardStrict } from './board.ts'
+// 写路径单一真源（2026-11-01）：本文件的 save() 是**第三处**直接覆盖（原方案漏了它），
+// 服务于界面侧 mutate 入口。只改工具面那两处的话，界面侧仍然非原子。
+import { writeJsonAtomic } from './atomic-write.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -55,8 +57,8 @@ export class TaskboardRemoteService extends TypertRemoteService {
   }
 
   private save(tasks: Task[]): void {
-    mkdirSync(dirname(this.cfg.boardFile), { recursive: true })
-    writeFileSync(this.cfg.boardFile, JSON.stringify({ tasks }, null, 2), 'utf8')
+    // 原子写（2026-11-01）：界面侧的 mutate 也走同一条写路径（mkdir 由 writeJsonAtomic 内部完成）
+    writeJsonAtomic(this.cfg.boardFile, { tasks })
   }
 
   /** UI 发布新任务 → 跨会话广播排队通知（wakeup=false：不打断，任何会话空闲时自主领取）。 */
