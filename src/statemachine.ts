@@ -209,6 +209,44 @@ export function lastTouchMs(task: TimeStamped): number {
  * @param opts - `nowMs` 与可选 `staleDays`（缺省 `STALE_DAYS_DEFAULT`）
  * @returns 停滞项，按停滞天数降序
  */
+/**
+ * 任务板的每步注入行（`agent/pre-step` 用）。
+ *
+ * 2026-11-15 主人：「需要审计和回顾的内容必须放在手边」。停滞项（I15）与待复查阻塞项
+ * （I13）此前**只在 `taskboard_status` 里浮出**——那是「得先想起来去查」的东西，不是
+ * 手边。这一行把它们顶到每步必经的位置，与 `【主线】`/`【长时域】` 并列。
+ *
+ * 只报非零项，全空时返回空串（调用方据此不注入）——不制造「没事也在喊」的噪音。
+ * @param tasks - 板上的全部任务。
+ * @param nowMs - 当前时刻（毫秒）。
+ * @param staleDays - 停滞阈值（天，I15）；缺省走 `STALE_DAYS_DEFAULT`。
+ * @returns 一行；无可报内容时空串。
+ */
+export function renderBoardLine(
+  tasks: readonly StaleCandidate[],
+  nowMs: number,
+  staleDays?: number,
+): string {
+  let pending = 0
+  let claimed = 0
+  let blocked = 0
+  for (const t of tasks) {
+    if (t.status === 'pending') pending += 1
+    else if (t.status === 'claimed') claimed += 1
+    else if (t.status === 'blocked') blocked += 1
+  }
+  const stale = staleOf(tasks, { nowMs, staleDays })
+  const due = dueReviews(tasks, nowMs)
+  if (pending + claimed + blocked === 0 && stale.length === 0 && due.length === 0) return ''
+  const parts = [`待办 ${String(pending)} · 进行中 ${String(claimed)} · 阻塞 ${String(blocked)}`]
+  if (stale.length > 0) {
+    const oldest = stale.reduce((max, item) => Math.max(max, item.idleDays), 0)
+    parts.push(`⚠ 停滞 ${String(stale.length)} 项（最老 ${String(oldest)} 天）`)
+  }
+  if (due.length > 0) parts.push(`⛔ 待复查 ${String(due.length)} 项`)
+  return `【任务板】${parts.join(' · ')}`
+}
+
 export function staleOf(tasks: readonly StaleCandidate[], opts: { nowMs: number; staleDays?: number }): StaleItem[] {
   const staleDays = opts.staleDays ?? STALE_DAYS_DEFAULT
   const out: StaleItem[] = []

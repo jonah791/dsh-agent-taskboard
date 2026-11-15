@@ -24,7 +24,7 @@ import { parseWhen, scheduledAt, sweepOnce, errText } from './schedule.ts'
 import type { SchedulableTask, SweepBoard } from './schedule.ts'
 // 状态机 v2（2026-09-22 主人「改进任务板和工作流，重点围绕任务的状态更新和管理」）：
 // 流转白名单 / 停滞判据 / blocked 三件套——语义正本 docs/semantic.md §4.5 · I11–I18
-import { allowedTransitions, assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, sameStateBlockPatch, staleOf } from './statemachine.ts'
+import { allowedTransitions, assertBlockedFields, assertTransition, completionMemoryText, dueReviews, isTaskStatus, lastTouchMs, renderBoardLine, sameStateBlockPatch, staleOf } from './statemachine.ts'
 import type { TaskStatus } from './statemachine.ts'
 // 终态归档回查（I16）：兑现「可用 taskboard 工具回查」那句曾经的假话
 import { filterArchiveTasks, readArchiveDir } from './archive.ts'
@@ -814,4 +814,40 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
   }))
+
+  // 每步一行「审计读数」（2026-11-15 主人：「需要审计和回顾的内容必须放在手边」）。
+  //
+  // 为什么必须注入而不是等我来查：本生态反复实测过的同一件事——不注入就等于不读
+  // （`dsh-task-journal` / `dsh-longhorizon` 源码顶部各写着同一条教训）。任务板的停滞项
+  // （I15）与待复查阻塞项（I13）此前**只在 `taskboard_status` 里浮出**，也就是「得先想起
+  // 来去查」那么一次调用；不改这一点，账记了也不会被回头看。
+  //
+  // 重注入判据与 task-journal 对齐：**内容变了才重注**，不按时间——「按小时重注入」
+  // 2026-11-12 被主人否过（拿现实时间当自身状态的标尺）。
+  const seenLines = new Set<string>()
+  ctx.on('agent/pre-step', (async (payload: any, next: any) => {
+    const decision = await next()
+    if (decision.kind !== 'enter') return decision
+    const sessionId = String(payload.agent?.session?.id ?? '')
+    if (sessionId === '') return decision
+    let line = ''
+    try {
+      line = renderBoardLine(loadBoard(boardPath).tasks, Date.now(), config.staleDays)
+    } catch {
+      // 注入面绝不可因此崩（同 task-journal 的读失败处理）。
+      return decision
+    }
+    if (line === '') return decision
+    const key = `${sessionId}|${line}`
+    if (seenLines.has(key)) return decision
+    if (seenLines.size >= 500) seenLines.clear()
+    seenLines.add(key)
+    return {
+      ...decision,
+      messages: [...decision.messages, createUserMessage({
+        content: [{ type: 'text', text: line }],
+        source: { kind: 'dsh-agent-taskboard' },
+      })],
+    }
+  }) as any, { prepend: true })
 }
