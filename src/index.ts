@@ -284,13 +284,16 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * 完成摘要回流主记忆库（I17：两条完成路径共用同一实现）。
    * 失败静默——任务完成已是落盘事实，不因回流失败回滚（保留原语义）。
+   * @param sessionId - 完成这条任务时的会话 id（dsh-agent-memory v0.61 据此盖证据坐标，
+   *   否则这条回流在阅读侧查不回原文）。两条路径都从 `exec` 取，取不到就不传——
+   *   记忆库宁缺不猜，不会编一个假坐标；远程路径没有会话，故不传。
    */
-  const rememberCompletion = (task: Task, summary: string): void => {
+  const rememberCompletion = (task: Task, summary: string, sessionId?: string): void => {
     try {
-      const api = (ctx as unknown as { memoryApi?: { remember(input: { text: string; kind?: string; tags?: string[]; key?: string }): Promise<unknown> } }).memoryApi
+      const api = (ctx as unknown as { memoryApi?: { remember(input: { text: string; kind?: string; tags?: string[]; key?: string; sessionId?: string }): Promise<unknown> } }).memoryApi
       if (api === undefined || !task.title) return
       const text = completionMemoryText(task, summary)
-      void api.remember({ text, kind: task.type === 'long' ? 'episodic' : 'knowledge', tags: ['任务板', task.id], key: 'task-' + task.id }).catch(() => { /* 回流失败静默 */ })
+      void api.remember({ text, kind: task.type === 'long' ? 'episodic' : 'knowledge', tags: ['任务板', task.id], key: 'task-' + task.id, ...(sessionId !== undefined && sessionId !== '' ? { sessionId } : {}) }).catch(() => { /* 回流失败静默 */ })
     } catch { /* 回流失败不阻塞任务完成 */ }
   }
 
@@ -622,7 +625,7 @@ export function apply(ctx: Context, config: Config): void {
       task.summary = summary
       saveBoard(boardPath, board)
       // 完成摘要回流主记忆库（2026-09-06）；与 update 的 done 路径共用同一实现（I17）
-      rememberCompletion(task, summary)
+      rememberCompletion(task, summary, callerSessionId(exec))
       return { taskId: task.id, status: task.status }
     },
   }))
@@ -751,7 +754,7 @@ export function apply(ctx: Context, config: Config): void {
 
       saveBoard(boardPath, board)
       // ③ I17：done 路径与 taskboard_complete 共用同一实现（摘要 + 记忆回流），不允许两条路产出不同结果
-      if (completed !== undefined) rememberCompletion(task, completed.summary)
+      if (completed !== undefined) rememberCompletion(task, completed.summary, callerSessionId(exec))
       return { taskId: task.id, status: task.status }
     },
   }))
