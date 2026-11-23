@@ -39,6 +39,11 @@ function bootBoard() {
     agents: { get: () => undefined, list: () => [] }, // 通知路径降级为空集（本测试不覆盖通知）
     effect: () => {},
     tools: { register: (def) => { tools.set(def.name, def) } },
+    // `apply` 末尾注册 `agent/pre-step` 注入钩子（lib/index.js:786）。本测试**不覆盖注入面**
+    // （不跑 pre-step 流程），所以空实现即可——但这一条必须存在：缺了 apply 直接
+    // TypeError，三条集成测试会全红在桩上而不是在行为上（lh-bd3ae556）。
+    // 返回空 disposer 而不是 undefined：apply 现在不保存返回值，将来若保存再调用也不会二次崩。
+    on: () => () => {},
   }
   apply(ctx, { boardFile, mainSessionId: 's-int-main', notifyOnPost: false })
   return {
